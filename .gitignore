@@ -20,3 +20,7 @@
 # Go workspace file
 go.work
 
+# Emacs backup files
+*.go~
+*.mod~
+*.lisp~
