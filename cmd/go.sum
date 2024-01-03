@@ -1,0 +1,4 @@
+fyne.io/fyne/v2 v2.4.3 h1:v2wncjEAcwXZ8UNmTCWTGL9+sGyPc5RuzBvM96GcC78=
+fyne.io/fyne/v2 v2.4.3/go.mod h1:1h3BKxmQYRJlr2g+RGVxedzr6vLVQ/AJmFWcF9CJnoQ=
+github.com/rasteric/zedit-fyne v0.0.0-20240102153801-e8a6c663350c h1:R6IDCALJbYpbYwMLFPLaQ9GYhT44OnedAw7gxTP37ok=
+github.com/rasteric/zedit-fyne v0.0.0-20240102153801-e8a6c663350c/go.mod h1:K1BgXYzBKDG6vywL+ixxLqBPAPXw+ebYqt3hZlANE94=

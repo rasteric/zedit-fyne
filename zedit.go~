@@ -1,0 +1,35 @@
+package zedit
+
+import (
+	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/widget"
+)
+
+type Zedit struct {
+	widget.BaseWidget
+	Rows            []widget.TextGridRow
+	Lines           int
+	Columns         int
+	ShowLineNumbers bool
+	ShowWhitespace  bool
+	TabWidth        int // If set to 0 the fyne.DefaultTabWidth is used
+	grid            *widget.TextGrid
+}
+
+func NewZedit(columns, lines int) *Zedit {
+	edit := Zedit{Lines: lines, Columns: columns, grid: widget.NewTextGrid()}
+	return &edit
+}
+
+func (z *Zedit) MinSize() fyne.Size {
+	s := widget.NewLabel("W").MinSize()
+	w := float32(z.Columns) * s.Width
+	h := float32(len(z.Rows)) * s.Height
+	return fyne.Size{Width: w, Height: h}
+}
+
+func (z *Zedit) CreateRenderer() fyne.WidgetRenderer {
+	c := container.NewScroll(z)
+	return widget.NewSimpleRenderer(c)
+}
