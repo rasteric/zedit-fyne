@@ -14,12 +14,12 @@ func main() {
 	ed.ShowLineNumbers = true
 	s := ""
 	for i := 0; i < 1000; i++ {
-		s += lorem.Sentence(5, 11)
+		s += lorem.Sentence(5, 15)
 		s += "\n"
 	}
 	ed.SetText(s)
-	w.SetContent(ed.Content())
-	// w.Canvas().Focus(ed)
+	w.SetContent(ed)
+	w.Canvas().Focus(ed)
 	// w.Resize(fyne.NewSize(480, 360))
 
 	w.ShowAndRun()

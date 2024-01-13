@@ -9,6 +9,7 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/driver/desktop"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	"github.com/chewxy/math32"
@@ -65,6 +66,17 @@ func (r *FixedSpacerRenderer) Objects() []fyne.CanvasObject {
 
 func (r *FixedSpacerRenderer) Refresh() {}
 
+// CharPos represents a character position in the grid.
+// If IsLineNumber is true, then the position is in the line
+// number display, Line contains the line number, and Column is 0.
+// Otherwise, Line and Column contain the line, column pair
+// of the grid closest to the position.
+type CharPos struct {
+	Line         int
+	Column       int
+	IsLineNumber bool
+}
+
 type ZGrid struct {
 	widget.BaseWidget
 	Rows            []widget.TextGridRow
@@ -72,6 +84,7 @@ type ZGrid struct {
 	Columns         int
 	ShowLineNumbers bool
 	ShowWhitespace  bool
+	ScrollFactor    float32
 	TabWidth        int // If set to 0 the fyne.DefaultTabWidth is used
 	grid            *widget.TextGrid
 	scroll          *container.Scroll
@@ -84,14 +97,11 @@ type ZGrid struct {
 	vSpacer         *FixedSpacer
 	maxLineLen      int
 	hasFocus        bool
-	// focus rectangle
-	focusLeft   *canvas.Line
-	focusRight  *canvas.Line
-	focusTop    *canvas.Line
-	focusBottom *canvas.Line
-	focusBorder *fyne.Container
+	background      *canvas.Rectangle
+	content         *fyne.Container
 }
 
+// ZGrid is like TextGrid but with an internal vertical scroll bar and an optional line number display.
 func NewZGrid(columns, lines int) *ZGrid {
 	bgcolor := gamut.Blends(theme.ForegroundColor(), theme.PrimaryColor(), 8)[2]
 	fgcolor := theme.BackgroundColor()
@@ -102,12 +112,12 @@ func NewZGrid(columns, lines int) *ZGrid {
 		fgcolor = gamut.Darker(fgcolor, 0.2)
 	}
 	z := ZGrid{Lines: lines, Columns: columns, grid: widget.NewTextGrid()}
-	z.focusLeft = canvas.NewLine(theme.SelectionColor())
-	z.focusRight = canvas.NewLine(theme.SelectionColor())
-	z.focusTop = canvas.NewLine(theme.SelectionColor())
-	z.focusBottom = canvas.NewLine(theme.SelectionColor())
+	z.ScrollFactor = 2.0
 	z.lineNumberStyle = &widget.CustomTextGridStyle{FGColor: fgcolor, BGColor: bgcolor}
 	z.grid = widget.NewTextGrid()
+	z.background = canvas.NewRectangle(theme.InputBackgroundColor()) //theme.InputBackgroundColor())
+	z.background.StrokeColor = theme.FocusColor()
+	z.background.StrokeWidth = 4
 	z.lineNumberGrid = widget.NewTextGrid()
 	z.charSize = fyne.MeasureText("M", theme.TextSize(), fyne.TextStyle{Monospace: true})
 	s := ""
@@ -119,15 +129,16 @@ func NewZGrid(columns, lines int) *ZGrid {
 	}
 	z.vSpacer = NewFixedSpacer(fyne.Size{Width: 0, Height: float32(z.Lines) * z.charSize.Height})
 
-	z.scroll = container.NewVScroll(z.vSpacer)
+	z.scroll = container.NewScroll(z.vSpacer)
 	z.scroll.OnScrolled = func(pos fyne.Position) {
 		z.lineOffset = max(0, int(math32.Round(pos.Y/z.charSize.Height)))
 		z.scroll.Offset = pos
+		z.hasFocus = true
 		z.Refresh()
 	}
 	z.SetText(s)
 	z.border = container.NewBorder(nil, nil, z.lineNumberGrid, z.scroll, z.grid)
-	z.focusBorder = container.NewBorder(z.focusTop, z.focusBottom, z.focusLeft, z.focusRight, z.border)
+	z.content = container.New(layout.NewStackLayout(), z.background, z.border)
 	return &z
 }
 
@@ -156,24 +167,56 @@ func (z *ZGrid) ScrollLeft(n int) {
 
 func (z *ZGrid) FocusGained() {
 	z.hasFocus = true
+	z.background.StrokeColor = theme.FocusColor()
+	z.background.Refresh()
 	z.Refresh()
 }
 
 func (z *ZGrid) FocusLost() {
 	z.hasFocus = false
+	z.background.StrokeColor = theme.BackgroundColor()
+	z.background.Refresh()
 	z.Refresh()
 }
 
-func (z *ZGrid) TypedRune(rune) {
+func (z *ZGrid) MouseIn(evt *desktop.MouseEvent) {}
 
+func (z *ZGrid) MouseMoved(evt *desktop.MouseEvent) {}
+
+func (z *ZGrid) MouseOut() {}
+
+func (z *ZGrid) Scrolled(evt *fyne.ScrollEvent) {
+	step := z.ScrollFactor * (evt.Scrolled.DY / z.charSize.Height)
+	z.lineOffset = min(len(z.Rows)-z.Lines/2, max(0, int(float32(z.lineOffset)-step)))
+	z.scroll.Offset = fyne.Position{X: z.scroll.Offset.X, Y: float32(z.lineOffset) * z.charSize.Height}
+	z.scroll.Refresh()
+	z.Refresh()
 }
 
-func (z *ZGrid) TypedKey(evt *fyne.KeyEvent) {
-
+func (z *ZGrid) Dragged(evt *fyne.DragEvent) {
+	fmt.Printf("pos=%v, delta=%v\n", z.PosToCharPos(evt.Position), evt.Dragged)
 }
 
-func (z *ZGrid) Content() fyne.CanvasObject {
-	return z.focusBorder
+func (z *ZGrid) DragEnd() {}
+
+func (z *ZGrid) TypedRune(rune) {}
+
+func (z *ZGrid) TypedKey(evt *fyne.KeyEvent) {}
+
+// PosToCharPos converts an internal position of the widget in Fyne's pixel unit to a
+// line, row pair.
+func (z *ZGrid) PosToCharPos(pos fyne.Position) CharPos {
+	x := pos.X - z.lineNumberGrid.Size().Width
+	y := pos.Y
+	if pos.X < z.lineNumberGrid.Size().Width {
+		return CharPos{z.lineOffset + int(y/z.charSize.Height+1.0), 0.0, true}
+	}
+	return CharPos{z.lineOffset + int(y/z.charSize.Height+1.0), int(math32.Round(x / z.charSize.Width)), false}
+}
+
+func (z *ZGrid) MinSize() fyne.Size {
+	return fyne.Size{Width: float32(z.lineNumberLen())*z.charSize.Width + float32(z.Columns)*z.charSize.Width,
+		Height: float32(z.Lines) * z.charSize.Height}
 }
 
 func (z *ZGrid) SetText(s string) {
@@ -212,38 +255,23 @@ func (z *ZGrid) TypedShortcut(s fyne.Shortcut) {
 }
 
 func (z *ZGrid) Refresh() {
-	if z.hasFocus {
-		z.focusLeft.Show()
-		z.focusRight.Show()
-		z.focusTop.Show()
-		z.focusBottom.Show()
-	} else {
-		z.focusLeft.Hide()
-		z.focusRight.Hide()
-		z.focusTop.Hide()
-		z.focusBottom.Hide()
-	}
 	if z.Rows != nil && len(z.Rows) > z.lineOffset {
 		z.grid.Rows = z.Rows[z.lineOffset:min(z.lineOffset+z.Lines, len(z.Rows))]
 		for i := range z.grid.Rows {
 			l := len(z.grid.Rows[i].Cells)
 			k := max(0, min(l-1, z.columnOffset))
 			m := min(l, z.columnOffset+z.Columns)
-			z.grid.Rows[i].Cells = z.grid.Rows[i].Cells[k:m]
-			if l > m {
-				z.grid.Rows[i].Cells[len(z.grid.Rows[i].Cells)-1].Rune = '…'
-			}
-			if z.columnOffset > 0 {
-				z.grid.Rows[i].Cells[0].Rune = '…'
-			}
+			cells := make([]widget.TextGridCell, 0)
+			cells = append(cells, z.grid.Rows[i].Cells[k:m]...)
+			row := widget.TextGridRow{Cells: cells, Style: z.grid.Rows[i].Style}
+			z.grid.Rows[i] = row
 		}
 	}
 	if z.ShowLineNumbers {
 		z.lineNumberGrid.Hidden = false
 		// add line numbers if necessary
-		s := strconv.Itoa(len(z.Rows))
-		qq := strconv.Itoa(len(s))
-		fmtStr := "%" + qq + "d "
+		ll := strconv.Itoa(z.lineNumberLen())
+		fmtStr := "%" + ll + "d "
 		c := z.lineOffset
 		for i := 0; i < z.Lines; i++ {
 			c++
@@ -256,13 +284,43 @@ func (z *ZGrid) Refresh() {
 				}
 			}
 		}
-		z.lineNumberGrid.Refresh()
-	} else {
-		z.lineNumberGrid.Hide()
 	}
+	z.lineNumberGrid.Refresh()
 	z.grid.Refresh()
 }
 
-func (z *ZGrid) CreateRenderer() fyne.WidgetRenderer {
-	return widget.NewSimpleRenderer(z.focusBorder)
+func (z *ZGrid) lineNumberLen() int {
+	s := strconv.Itoa(len(z.Rows))
+	return len(s)
+}
+
+func (s *ZGrid) CreateRenderer() fyne.WidgetRenderer {
+	return &zgridRenderer{zgrid: s}
+}
+
+type zgridRenderer struct {
+	zgrid *ZGrid
+}
+
+func (r *zgridRenderer) Destroy() {}
+
+func (r *zgridRenderer) Layout(size fyne.Size) {
+	s := r.zgrid.MinSize()
+	r.zgrid.border.Resize(fyne.Size{Width: s.Width - theme.Padding(), Height: s.Height})
+	r.zgrid.border.Move(fyne.Position{X: theme.Padding(), Y: theme.Padding()})
+	r.zgrid.scroll.Resize(fyne.Size{Width: theme.ScrollBarSize(), Height: r.zgrid.grid.MinSize().Height})
+	r.zgrid.scroll.Move(fyne.Position{X: s.Width - theme.ScrollBarSize() - theme.Padding(), Y: theme.Padding() / 2})
+	r.zgrid.background.Resize(fyne.Size{Width: s.Width + theme.Padding(), Height: s.Height - theme.Padding()})
+}
+
+func (r *zgridRenderer) MinSize() fyne.Size {
+	return r.zgrid.MinSize()
+}
+
+func (r *zgridRenderer) Objects() []fyne.CanvasObject {
+	return []fyne.CanvasObject{r.zgrid.content}
+}
+
+func (r *zgridRenderer) Refresh() {
+	r.zgrid.Refresh()
 }
