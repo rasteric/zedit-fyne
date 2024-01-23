@@ -2,6 +2,7 @@ package zedit
 
 import (
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 
@@ -66,20 +67,10 @@ func (r *FixedSpacerRenderer) Objects() []fyne.CanvasObject {
 
 func (r *FixedSpacerRenderer) Refresh() {}
 
-// CharPos represents a character position in the grid.
-// If IsLineNumber is true, then the position is in the line
-// number display, Line contains the line number, and Column is 0.
-// Otherwise, Line and Column contain the line, column pair
-// of the grid closest to the position.
-type CharPos struct {
-	Line         int
-	Column       int
-	IsLineNumber bool
-}
-
 type ZGrid struct {
 	widget.BaseWidget
 	Rows            []widget.TextGridRow
+	Tags            *TagContainer
 	Lines           int
 	Columns         int
 	ShowLineNumbers bool
@@ -92,6 +83,7 @@ type ZGrid struct {
 	columnOffset    int
 	charSize        fyne.Size
 	border          *fyne.Container
+	defaultStyle    *widget.CustomTextGridStyle
 	lineNumberStyle *widget.CustomTextGridStyle
 	lineNumberGrid  *widget.TextGrid
 	vSpacer         *FixedSpacer
@@ -99,6 +91,8 @@ type ZGrid struct {
 	hasFocus        bool
 	background      *canvas.Rectangle
 	content         *fyne.Container
+	selStart        *CharPos
+	selEnd          *CharPos
 }
 
 // ZGrid is like TextGrid but with an internal vertical scroll bar and an optional line number display.
@@ -112,7 +106,9 @@ func NewZGrid(columns, lines int) *ZGrid {
 		fgcolor = gamut.Darker(fgcolor, 0.2)
 	}
 	z := ZGrid{Lines: lines, Columns: columns, grid: widget.NewTextGrid()}
+	z.Tags = NewTagContainer()
 	z.ScrollFactor = 2.0
+	z.defaultStyle = &widget.CustomTextGridStyle{FGColor: theme.ForegroundColor(), BGColor: theme.InputBackgroundColor()}
 	z.lineNumberStyle = &widget.CustomTextGridStyle{FGColor: fgcolor, BGColor: bgcolor}
 	z.grid = widget.NewTextGrid()
 	z.background = canvas.NewRectangle(theme.InputBackgroundColor()) //theme.InputBackgroundColor())
@@ -139,11 +135,22 @@ func NewZGrid(columns, lines int) *ZGrid {
 	z.SetText(s)
 	z.border = container.NewBorder(nil, nil, z.lineNumberGrid, z.scroll, z.grid)
 	z.content = container.New(layout.NewStackLayout(), z.background, z.border)
+	z.Tags.AddStyler(TagStyler{Tag: SimpleTag{"selection"}, StyleFunc: z.SelectionStyleFunc()})
 	return &z
 }
 
 func (z *ZGrid) SetLineNumberStyle(style *widget.CustomTextGridStyle) {
 	z.lineNumberStyle = style
+}
+
+func (z *ZGrid) SelectionStyleFunc() TagStyleFunc {
+	return TagStyleFunc(func(c widget.TextGridCell) widget.TextGridCell {
+		selStyle := &widget.CustomTextGridStyle{FGColor: theme.ForegroundColor(), BGColor: theme.SelectionColor()}
+		return widget.TextGridCell{
+			Rune:  c.Rune,
+			Style: selStyle,
+		}
+	})
 }
 
 func (z *ZGrid) SetTopLine(x int) {
@@ -153,6 +160,16 @@ func (z *ZGrid) SetTopLine(x int) {
 		pos := z.scroll.Offset
 		z.scroll.Offset = fyne.Position{X: pos.X, Y: max(0, z.charSize.Height*float32(z.lineOffset))}
 	}
+}
+
+func (z *ZGrid) ScrollDown() {
+	li := min(len(z.Rows)-z.Lines/2, z.lineOffset+1)
+	z.SetTopLine(li)
+}
+
+func (z *ZGrid) ScrollUp() {
+	li := max(0, z.lineOffset-1)
+	z.SetTopLine(li)
 }
 
 func (z *ZGrid) ScrollRight(n int) {
@@ -194,10 +211,29 @@ func (z *ZGrid) Scrolled(evt *fyne.ScrollEvent) {
 }
 
 func (z *ZGrid) Dragged(evt *fyne.DragEvent) {
-	fmt.Printf("pos=%v, delta=%v\n", z.PosToCharPos(evt.Position), evt.Dragged)
+	pos := z.PosToCharPos(evt.Position)
+	if z.selStart == nil {
+		z.selStart = &pos
+		return
+	}
+	z.selEnd = &pos
+	tag := SimpleTag{"selection"}
+	interval := CharInterval{Start: *z.selStart, End: *z.selEnd}.MaybeSwap()
+	z.Tags.Upsert(tag, interval)
+	if pos.Line <= z.lineOffset {
+		z.ScrollUp()
+	} else if pos.Line >= z.lineOffset+z.Lines-1 {
+		z.ScrollDown()
+	} else {
+		z.Refresh()
+	}
+	fmt.Printf("selection start=%v end=%v\n", interval.Start, interval.End)
 }
 
-func (z *ZGrid) DragEnd() {}
+func (z *ZGrid) DragEnd() {
+	z.selStart = nil
+	z.selEnd = nil
+}
 
 func (z *ZGrid) TypedRune(rune) {}
 
@@ -208,7 +244,7 @@ func (z *ZGrid) TypedKey(evt *fyne.KeyEvent) {}
 func (z *ZGrid) PosToCharPos(pos fyne.Position) CharPos {
 	x := pos.X - z.lineNumberGrid.Size().Width
 	y := pos.Y
-	if pos.X < z.lineNumberGrid.Size().Width {
+	if z.lineNumberGrid.Visible() && pos.X < z.lineNumberGrid.Size().Width {
 		return CharPos{z.lineOffset + int(y/z.charSize.Height+1.0), 0.0, true}
 	}
 	return CharPos{z.lineOffset + int(y/z.charSize.Height+1.0), int(math32.Round(x / z.charSize.Width)), false}
@@ -257,14 +293,15 @@ func (z *ZGrid) TypedShortcut(s fyne.Shortcut) {
 func (z *ZGrid) Refresh() {
 	if z.Rows != nil && len(z.Rows) > z.lineOffset {
 		z.grid.Rows = z.Rows[z.lineOffset:min(z.lineOffset+z.Lines, len(z.Rows))]
-		for i := range z.grid.Rows {
-			l := len(z.grid.Rows[i].Cells)
+		for i, row := range z.grid.Rows {
+			l := len(row.Cells)
 			k := max(0, min(l-1, z.columnOffset))
 			m := min(l, z.columnOffset+z.Columns)
-			cells := make([]widget.TextGridCell, 0)
-			cells = append(cells, z.grid.Rows[i].Cells[k:m]...)
-			row := widget.TextGridRow{Cells: cells, Style: z.grid.Rows[i].Style}
-			z.grid.Rows[i] = row
+			row.Cells = row.Cells[k:m]
+			for j := range row.Cells {
+				row.Cells[j] = widget.TextGridCell{Rune: row.Cells[j].Rune, Style: nil}
+			}
+			z.grid.SetRow(i, row)
 		}
 	}
 	if z.ShowLineNumbers {
@@ -285,8 +322,75 @@ func (z *ZGrid) Refresh() {
 			}
 		}
 	}
+	if z.Tags.lineStylers != nil {
+		for i := len(z.Tags.stylers) - 1; i >= 0; i-- {
+			styler := z.Tags.lineStylers[i]
+			interval, ok := z.Tags.Lookup(styler.Tag)
+			if !ok {
+				continue
+			}
+			log.Println(styler.Tag)
+			z.maybeStyleLineRange(interval, styler.LineStyleFunc)
+		}
+	}
+	if z.Tags.stylers != nil {
+		for i := len(z.Tags.stylers) - 1; i >= 0; i-- {
+			styler := z.Tags.stylers[i]
+			interval, ok := z.Tags.Lookup(styler.Tag)
+			if !ok {
+				continue
+			}
+			log.Printf("styling %v\n", styler.Tag)
+			z.maybeStyleRange(interval, styler.StyleFunc)
+		}
+	}
 	z.lineNumberGrid.Refresh()
 	z.grid.Refresh()
+}
+
+// curreentViewport is the char interval that is currently displayed
+func (z *ZGrid) currentViewport() CharInterval {
+	endLine := min(len(z.Rows)-1, z.lineOffset+z.Lines)
+	endColumn := len(z.Rows[endLine].Cells) - 1
+	return CharInterval{Start: CharPos{Line: z.lineOffset, Column: 0}, End: CharPos{Line: endLine, Column: endColumn}}
+}
+
+// maybeStyleRange styles the given char interval by style insofar as it is within
+// the visible range of the underlying TextGrid (otherwise, nothing is done).
+func (z *ZGrid) maybeStyleRange(interval CharInterval, styler TagStyleFunc) {
+	viewPort := z.currentViewport()
+	if interval.OutsideOf(viewPort) {
+		return
+	}
+	rangeStart := MaxPos(viewPort.Start, interval.Start)
+	rangeEnd := MinPos(viewPort.End, interval.End)
+	for i := rangeStart.Line; i < rangeEnd.Line; i++ {
+		startCol := 0
+		if i == rangeStart.Line {
+			startCol = rangeStart.Column
+		}
+		endCol := len(z.Rows[i].Cells) - 1
+		if i == rangeEnd.Line {
+			endCol = min(endCol, rangeEnd.Column)
+		}
+		for j := startCol; j <= endCol; j++ {
+			z.grid.SetCell(i-z.lineOffset, j, styler(z.grid.Rows[i-z.lineOffset].Cells[j]))
+		}
+	}
+}
+
+// maybeStyleLineRange is the same as maybeStyleRange except that a TagLineStyleFunc
+// is used and only the style of the line as a whole is set.
+func (z *ZGrid) maybeStyleLineRange(interval CharInterval, styler TagLineStyleFunc) {
+	viewPort := z.currentViewport()
+	if interval.OutsideOf(viewPort) {
+		return
+	}
+	rangeStart := MaxPos(viewPort.Start, interval.Start)
+	rangeEnd := MinPos(viewPort.End, interval.End)
+	for i := rangeStart.Line; i <= rangeEnd.Line; i++ {
+		z.grid.SetRowStyle(i, styler(z.grid.Rows[i].Style))
+	}
 }
 
 func (z *ZGrid) lineNumberLen() int {
