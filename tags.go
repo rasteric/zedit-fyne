@@ -126,7 +126,7 @@ type TagContainer struct {
 func NewTagContainer() *TagContainer {
 	tags := TagContainer{}
 	tags.names = make(map[string]CharInterval)
-	tags.lookup = interval.NewMultiValueSearchTreeWithOptions[Tag, CharPos](CmpPos)
+	tags.lookup = interval.NewMultiValueSearchTreeWithOptions[Tag, CharPos](CmpPos, interval.TreeWithIntervalPoint())
 	return &tags
 }
 

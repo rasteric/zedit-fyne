@@ -224,10 +224,17 @@ func (z *ZGrid) Dragged(evt *fyne.DragEvent) {
 		z.ScrollUp()
 	} else if pos.Line >= z.lineOffset+z.Lines-1 {
 		z.ScrollDown()
-	} else {
-		z.Refresh()
 	}
+	z.Refresh()
 	fmt.Printf("selection start=%v end=%v\n", interval.Start, interval.End)
+}
+
+func (z *ZGrid) Cursor() desktop.Cursor {
+	return desktop.TextCursor
+}
+
+func (z *ZGrid) Tapped(evt *fyne.PointEvent) {
+	z.RemoveSelection()
 }
 
 func (z *ZGrid) DragEnd() {
@@ -239,15 +246,26 @@ func (z *ZGrid) TypedRune(rune) {}
 
 func (z *ZGrid) TypedKey(evt *fyne.KeyEvent) {}
 
+// SELECTION HANDLING
+
+// RemoveSelection removes the current selection, both the range returned by GetSelection
+// and its graphical display.
+func (z *ZGrid) RemoveSelection() {
+	z.Tags.Delete(SimpleTag{"selection"})
+	z.selStart = nil
+	z.selEnd = nil
+	z.Refresh()
+}
+
 // PosToCharPos converts an internal position of the widget in Fyne's pixel unit to a
 // line, row pair.
 func (z *ZGrid) PosToCharPos(pos fyne.Position) CharPos {
 	x := pos.X - z.lineNumberGrid.Size().Width
 	y := pos.Y
 	if z.lineNumberGrid.Visible() && pos.X < z.lineNumberGrid.Size().Width {
-		return CharPos{z.lineOffset + int(y/z.charSize.Height+1.0), 0.0, true}
+		return CharPos{z.lineOffset + int(y/z.charSize.Height), 0.0, true}
 	}
-	return CharPos{z.lineOffset + int(y/z.charSize.Height+1.0), int(math32.Round(x / z.charSize.Width)), false}
+	return CharPos{z.lineOffset + int(y/z.charSize.Height), int(math32.Trunc(x / z.charSize.Width)), false}
 }
 
 func (z *ZGrid) MinSize() fyne.Size {
@@ -364,7 +382,7 @@ func (z *ZGrid) maybeStyleRange(interval CharInterval, styler TagStyleFunc) {
 	}
 	rangeStart := MaxPos(viewPort.Start, interval.Start)
 	rangeEnd := MinPos(viewPort.End, interval.End)
-	for i := rangeStart.Line; i < rangeEnd.Line; i++ {
+	for i := rangeStart.Line; i <= rangeEnd.Line; i++ {
 		startCol := 0
 		if i == rangeStart.Line {
 			startCol = rangeStart.Column
