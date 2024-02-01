@@ -153,6 +153,7 @@ func (z *ZGrid) SelectionStyleFunc() TagStyleFunc {
 	})
 }
 
+// SetTopLine sets the zgrid to display starting with the given line number.
 func (z *ZGrid) SetTopLine(x int) {
 	z.lineOffset = x
 	z.Refresh()
@@ -160,6 +161,14 @@ func (z *ZGrid) SetTopLine(x int) {
 		pos := z.scroll.Offset
 		z.scroll.Offset = fyne.Position{X: pos.X, Y: max(0, z.charSize.Height*float32(z.lineOffset))}
 	}
+}
+
+// Row returns the row at line i. The row returned is not a copy but the original.
+func (z *ZGrid) Row(i int) widget.TextGridRow {
+	if i < 0 || i >= len(z.Rows) {
+		return widget.TextGridRow{}
+	}
+	return z.Rows[i]
 }
 
 func (z *ZGrid) ScrollDown() {
