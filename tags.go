@@ -67,13 +67,12 @@ type CharInterval struct {
 
 // OutsideOf returns true if c1 is outside of c2.
 func (c1 CharInterval) OutsideOf(c2 CharInterval) bool {
-	if CmpPos(c1.End, c2.Start) == -1 {
-		return true
-	}
-	if CmpPos(c1.Start, c2.End) == 1 {
-		return true
-	}
-	return false
+	return CmpPos(c1.End, c2.Start) == -1 || CmpPos(c1.Start, c2.End) == 1
+}
+
+// Contains returns true if the char interval contains the given position, false otherwise.
+func (c CharInterval) Contains(pos CharPos) bool {
+	return CmpPos(pos, c.Start) >= 0 && CmpPos(pos, c.End) <= 0
 }
 
 // MaybeSwap compares the start and the end, and if the end is before

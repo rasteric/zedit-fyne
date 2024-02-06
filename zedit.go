@@ -1,10 +1,13 @@
 package zedit
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"strconv"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -77,6 +80,18 @@ type ZGrid struct {
 	ShowWhitespace  bool
 	ScrollFactor    float32
 	TabWidth        int // If set to 0 the fyne.DefaultTabWidth is used
+	// text cursor
+	DrawCaret            bool
+	CaretBlinkDelay      time.Duration
+	CaretOnDuration      time.Duration
+	CaretOffDuration     time.Duration
+	CaretPos             CharPos
+	caretState           uint32
+	hasCaretBlinking     uint32
+	invertedDefaultStyle *widget.CustomTextGridStyle
+	lastInteraction      time.Time
+	caretBlinkCancel     func()
+	// internal fields
 	grid            *widget.TextGrid
 	scroll          *container.Scroll
 	lineOffset      int
@@ -93,6 +108,7 @@ type ZGrid struct {
 	content         *fyne.Container
 	selStart        *CharPos
 	selEnd          *CharPos
+	refreshCancel   func()
 }
 
 // ZGrid is like TextGrid but with an internal vertical scroll bar and an optional line number display.
@@ -106,6 +122,15 @@ func NewZGrid(columns, lines int) *ZGrid {
 		fgcolor = gamut.Darker(fgcolor, 0.2)
 	}
 	z := ZGrid{Lines: lines, Columns: columns, grid: widget.NewTextGrid()}
+	z.CaretBlinkDelay = 3 * time.Second
+	z.CaretOnDuration = 600 * time.Millisecond
+	z.CaretOffDuration = 200 * time.Millisecond
+	z.DrawCaret = true
+	z.lastInteraction = time.Now()
+	z.caretState = 1
+	_, z.caretBlinkCancel = context.WithCancel(context.Background())
+	z.invertedDefaultStyle = &widget.CustomTextGridStyle{FGColor: theme.InputBackgroundColor(), BGColor: theme.ForegroundColor()}
+	z.refreshCancel = func() {}
 	z.Tags = NewTagContainer()
 	z.ScrollFactor = 2.0
 	z.defaultStyle = &widget.CustomTextGridStyle{FGColor: theme.ForegroundColor(), BGColor: theme.InputBackgroundColor()}
@@ -136,6 +161,7 @@ func NewZGrid(columns, lines int) *ZGrid {
 	z.border = container.NewBorder(nil, nil, z.lineNumberGrid, z.scroll, z.grid)
 	z.content = container.New(layout.NewStackLayout(), z.background, z.border)
 	z.Tags.AddStyler(TagStyler{Tag: SimpleTag{"selection"}, StyleFunc: z.SelectionStyleFunc()})
+	z.BlinkCaret(true)
 	return &z
 }
 
@@ -169,6 +195,113 @@ func (z *ZGrid) Row(i int) widget.TextGridRow {
 		return widget.TextGridRow{}
 	}
 	return z.Rows[i]
+}
+
+// RowText returns the text of the row at i, the empty string if i is out of bounds.
+func (z *ZGrid) RowText(i int) string {
+	if i < 0 || i >= len(z.Rows) {
+		return ""
+	}
+	var sb strings.Builder
+	for _, c := range z.Rows[i].Cells {
+		sb.WriteRune(c.Rune)
+	}
+	return sb.String()
+}
+
+// SetCell sets the zgrid cell at the given line and column.
+func (z *ZGrid) SetCell(pos CharPos, cell widget.TextGridCell) {
+	z.Rows[pos.Line].Cells[pos.Column] = cell
+}
+
+// SetRow sets the zgrid row. If row is beyond the current size, empty rows are added accordingly.
+func (z *ZGrid) SetRow(row int, content widget.TextGridRow) {
+	if row >= len(z.Rows) {
+		rows := make([]widget.TextGridRow, row-len(z.Rows)+1)
+		z.Rows = append(z.Rows, rows...)
+	}
+	z.Rows[row] = content
+}
+
+// FindParagraphStart finds the start row of the paragraph in which row is located.
+// If the row is 0, 0 is returned, otherwise this checks for the next line ending with lf and
+// returns the row after it.
+func (grid *ZGrid) FindParagraphStart(row int, lf rune) int {
+	if row <= 0 {
+		return 0
+	}
+	k := len(grid.Rows[row-1].Cells)
+	if k == 0 {
+		return row
+	}
+	if grid.Rows[row-1].Cells[k-1].Rune == lf {
+		return row
+	}
+	return grid.FindParagraphStart(row-1, lf)
+}
+
+// SetRune sets the rune at a row, column. The indices must be valid.
+func (grid *ZGrid) SetRune(pos CharPos, r rune) {
+	grid.Rows[pos.Line].Cells[pos.Column].Rune = r
+}
+
+// SetStyle sets the style of the cell at row, column. The indices must be valid.
+func (grid *ZGrid) SetStyle(pos CharPos, style widget.TextGridStyle) {
+	grid.Rows[pos.Line].Cells[pos.Column].Style = style
+}
+
+// SetStyleRange sets the style to each cell in the given range.
+func (grid *ZGrid) SetStyleRange(interval CharInterval, style widget.TextGridStyle) {
+	for i := interval.Start.Line; i <= interval.End.Line; i++ {
+		var s, e int
+		if i == interval.Start.Line {
+			s = interval.Start.Column
+		}
+		if i == interval.End.Line {
+			e = interval.End.Column
+		} else {
+			e = len(grid.Rows[i].Cells) - 1
+		}
+		for j := s; j <= e; j++ {
+			grid.Rows[i].Cells[j].Style = style
+		}
+	}
+}
+
+// Text returns the ZGrid's text as string.
+func (grid *ZGrid) Text() string {
+	var sb strings.Builder
+	for i := range grid.Rows {
+		for j := range grid.Rows[i].Cells {
+			sb.WriteRune(grid.Rows[i].Cells[j].Rune)
+		}
+		if i < len(grid.Rows) {
+			sb.WriteRune('\n')
+		}
+	}
+	return sb.String()
+}
+
+// SetRowStyle sets the style of the row. The given row must be valid.
+func (grid *ZGrid) SetRowStyle(row int, style widget.TextGridStyle) {
+	grid.Rows[row].Style = style
+}
+
+// FindParagraphEnd finds the end row of the paragraph in which row is located.
+// If row is the last row, then it is returned. Otherwise, it checks for the next row that
+// ends in lf (which may be the row with which this method was called).
+func (grid *ZGrid) FindParagraphEnd(row int, lf rune) int {
+	if row >= len(grid.Rows)-1 {
+		return row
+	}
+	k := len(grid.Rows[row].Cells)
+	if k == 0 {
+		return row
+	}
+	if grid.Rows[row].Cells[k-1].Rune == lf {
+		return row
+	}
+	return grid.FindParagraphEnd(row+1, lf)
 }
 
 func (z *ZGrid) ScrollDown() {
@@ -235,7 +368,6 @@ func (z *ZGrid) Dragged(evt *fyne.DragEvent) {
 		z.ScrollDown()
 	}
 	z.Refresh()
-	fmt.Printf("selection start=%v end=%v\n", interval.Start, interval.End)
 }
 
 func (z *ZGrid) Cursor() desktop.Cursor {
@@ -251,7 +383,9 @@ func (z *ZGrid) DragEnd() {
 	z.selEnd = nil
 }
 
-func (z *ZGrid) TypedRune(rune) {}
+func (z *ZGrid) TypedRune(rune) {
+	z.lastInteraction = time.Now()
+}
 
 func (z *ZGrid) TypedKey(evt *fyne.KeyEvent) {}
 
@@ -318,17 +452,29 @@ func (z *ZGrid) TypedShortcut(s fyne.Shortcut) {
 }
 
 func (z *ZGrid) Refresh() {
+	z.refreshCancel()
+	var ctx context.Context
+	ctx, z.refreshCancel = context.WithCancel(context.Background())
+	z.refreshProc(ctx)
+}
+
+func (z *ZGrid) refreshProc(ctx context.Context) {
 	if z.Rows != nil && len(z.Rows) > z.lineOffset {
-		z.grid.Rows = z.Rows[z.lineOffset:min(z.lineOffset+z.Lines, len(z.Rows))]
-		for i, row := range z.grid.Rows {
-			l := len(row.Cells)
-			k := max(0, min(l-1, z.columnOffset))
-			m := min(l, z.columnOffset+z.Columns)
-			row.Cells = row.Cells[k:m]
-			for j := range row.Cells {
-				row.Cells[j] = widget.TextGridCell{Rune: row.Cells[j].Rune, Style: nil}
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			z.grid.Rows = z.Rows[z.lineOffset:min(z.lineOffset+z.Lines, len(z.Rows))]
+			for i, row := range z.grid.Rows {
+				l := len(row.Cells)
+				k := max(0, min(l-1, z.columnOffset))
+				m := min(l, z.columnOffset+z.Columns)
+				row.Cells = row.Cells[k:m]
+				for j := range row.Cells {
+					row.Cells[j] = widget.TextGridCell{Rune: row.Cells[j].Rune, Style: nil}
+				}
+				z.grid.SetRow(i, row)
 			}
-			z.grid.SetRow(i, row)
 		}
 	}
 	if z.ShowLineNumbers {
@@ -338,46 +484,66 @@ func (z *ZGrid) Refresh() {
 		fmtStr := "%" + ll + "d "
 		c := z.lineOffset
 		for i := 0; i < z.Lines; i++ {
-			c++
-			s := []rune(fmt.Sprintf(fmtStr, c))
-			for j := 0; j < len(s); j++ {
-				if c < len(z.Rows) {
-					z.lineNumberGrid.SetCell(i, j, widget.TextGridCell{Rune: s[j], Style: z.lineNumberStyle})
-				} else {
-					z.lineNumberGrid.SetCell(i, j, widget.TextGridCell{Rune: ' ', Style: z.lineNumberStyle})
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				c++
+				s := []rune(fmt.Sprintf(fmtStr, c))
+				for j := 0; j < len(s); j++ {
+					if c < len(z.Rows) {
+						z.lineNumberGrid.SetCell(i, j, widget.TextGridCell{Rune: s[j], Style: z.lineNumberStyle})
+					} else {
+						z.lineNumberGrid.SetCell(i, j, widget.TextGridCell{Rune: ' ', Style: z.lineNumberStyle})
+					}
 				}
 			}
 		}
 	}
 	if z.Tags.lineStylers != nil {
 		for i := len(z.Tags.stylers) - 1; i >= 0; i-- {
-			styler := z.Tags.lineStylers[i]
-			interval, ok := z.Tags.Lookup(styler.Tag)
-			if !ok {
-				continue
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				styler := z.Tags.lineStylers[i]
+				interval, ok := z.Tags.Lookup(styler.Tag)
+				if !ok {
+					continue
+				}
+				log.Println(styler.Tag)
+				z.maybeStyleLineRange(interval, styler.LineStyleFunc)
 			}
-			log.Println(styler.Tag)
-			z.maybeStyleLineRange(interval, styler.LineStyleFunc)
 		}
 	}
 	if z.Tags.stylers != nil {
 		for i := len(z.Tags.stylers) - 1; i >= 0; i-- {
-			styler := z.Tags.stylers[i]
-			interval, ok := z.Tags.Lookup(styler.Tag)
-			if !ok {
-				continue
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				styler := z.Tags.stylers[i]
+				interval, ok := z.Tags.Lookup(styler.Tag)
+				if !ok {
+					continue
+				}
+				log.Printf("styling %v\n", styler.Tag)
+				z.maybeStyleRange(interval, styler.StyleFunc)
 			}
-			log.Printf("styling %v\n", styler.Tag)
-			z.maybeStyleRange(interval, styler.StyleFunc)
 		}
 	}
-	z.lineNumberGrid.Refresh()
-	z.grid.Refresh()
+	select {
+	case <-ctx.Done():
+		return
+	default:
+		z.lineNumberGrid.Refresh()
+		z.grid.Refresh()
+	}
 }
 
 // curreentViewport is the char interval that is currently displayed
 func (z *ZGrid) currentViewport() CharInterval {
-	endLine := min(len(z.Rows)-1, z.lineOffset+z.Lines)
+	endLine := min(len(z.Rows)-1, z.lineOffset+z.Lines-1)
 	endColumn := len(z.Rows[endLine].Cells) - 1
 	return CharInterval{Start: CharPos{Line: z.lineOffset, Column: 0}, End: CharPos{Line: endLine, Column: endColumn}}
 }
@@ -404,6 +570,67 @@ func (z *ZGrid) maybeStyleRange(interval CharInterval, styler TagStyleFunc) {
 			z.grid.SetCell(i-z.lineOffset, j, styler(z.grid.Rows[i-z.lineOffset].Cells[j]))
 		}
 	}
+}
+
+// CARET HANDLING
+
+// drawCaret draws the text cursor if necessary.
+func (z *ZGrid) maybeDrawCaret() {
+	if !z.DrawCaret || !z.currentViewport().Contains(z.CaretPos) {
+		return
+	}
+	line := z.CaretPos.Line - z.lineOffset
+	col := min(len(z.grid.Rows[line].Cells)-1, z.CaretPos.Column)
+	switch atomic.LoadUint32(&z.caretState) {
+	case 2:
+		z.grid.Rows[line].Cells[col].Style = z.invertedDefaultStyle
+	case 1:
+		z.grid.Rows[line].Cells[col].Style = z.defaultStyle
+	default:
+		z.grid.Rows[line].Cells[col].Style = z.Rows[z.CaretPos.Line].Cells[col].Style
+	}
+	z.grid.Refresh()
+}
+
+// BlinkCursor starts blinking the cursor or stops the cursor from blinking.
+func (z *ZGrid) BlinkCaret(on bool) {
+	if !on {
+		z.caretBlinkCancel()
+		atomic.StoreUint32(&z.hasCaretBlinking, 0)
+		atomic.StoreUint32(&z.caretState, 2)
+		z.maybeDrawCaret()
+		return
+	}
+	atomic.StoreUint32(&z.hasCaretBlinking, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	z.caretBlinkCancel = cancel
+	go func(ctx context.Context, z *ZGrid) {
+		var oddTick bool
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				if oddTick && time.Since(z.lastInteraction) > z.CaretBlinkDelay {
+					atomic.StoreUint32(&z.caretState, 1)
+					oddTick = false
+					z.maybeDrawCaret()
+					time.Sleep(z.CaretOffDuration)
+				} else {
+					atomic.StoreUint32(&z.caretState, 2)
+					oddTick = true
+					z.maybeDrawCaret()
+					time.Sleep(z.CaretOnDuration)
+				}
+			}
+		}
+	}(ctx, z)
+}
+
+// HasBlinkingCaret returns true if the input cursor is blinking, false otherwise.
+// use BlinkCursor to switch blinking on or off.
+func (z *ZGrid) HasBlinkingCaret() bool {
+	return atomic.LoadUint32(&z.hasCaretBlinking) > 0
 }
 
 // maybeStyleLineRange is the same as maybeStyleRange except that a TagLineStyleFunc
@@ -455,3 +682,10 @@ func (r *zgridRenderer) Objects() []fyne.CanvasObject {
 func (r *zgridRenderer) Refresh() {
 	r.zgrid.Refresh()
 }
+
+// func (z *ZGrid) InvertStyle(style widget.TextGridStyle) widget.TextGridStyle {
+// 	if style == nil {
+// 		return z.invertedDefaultStyle
+// 	}
+// 	return &widget.CustomTextGridStyle{FGColor: style.BackgroundColor(), BGColor: style.TextColor()}
+// }
