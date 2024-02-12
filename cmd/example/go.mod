@@ -1,6 +1,8 @@
 module github.com/rasteric/zedit-fyne/cmd
 
-go 1.21.4
+go 1.22
+
+toolchain go1.22.0
 
 replace github.com/rasteric/zedit-fyne => ../../
 
@@ -31,7 +33,6 @@ require (
 	github.com/muesli/gamut v0.3.1 // indirect
 	github.com/muesli/kmeans v0.3.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
-	github.com/rasteric/flags v0.0.0-20191029113133-ef59ddff9f98 // indirect
 	github.com/rdleal/intervalst v1.2.2 // indirect
 	github.com/srwiley/oksvg v0.0.0-20221011165216-be6e8873101c // indirect
 	github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef // indirect

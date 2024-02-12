@@ -246,8 +246,6 @@ github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZb
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/posener/complete v1.1.1/go.mod h1:em0nMJCgc9GFtwrmVmEMR/ZL6WyhyjMBndrE9hABlRI=
 github.com/prometheus/client_model v0.0.0-20190812154241-14fe0d1b01d4/go.mod h1:xMI15A0UPsDsEKsMN9yxemIoYk6Tm2C1GtYGdfGttqA=
-github.com/rasteric/flags v0.0.0-20191029113133-ef59ddff9f98 h1:4V0cQGSDwhCmlLEcSUBCbz9VKsXbm9lGySs+MvGcKMY=
-github.com/rasteric/flags v0.0.0-20191029113133-ef59ddff9f98/go.mod h1:GJRvGo78xEI6Kj+ivzTmLcx3NtBtS87l5r5be4Vw0tk=
 github.com/rdleal/intervalst v1.2.2 h1:cw93gelL8qIAPuOwT+oHFewumFdrdW/QMFqgRhLUrlY=
 github.com/rdleal/intervalst v1.2.2/go.mod h1:xO89Z6BC+LQDH+IPQQw/OESt5UADgFD41tYMUINGpxQ=
 github.com/rogpeppe/fastuuid v1.2.0/go.mod h1:jVj6XXZzXRy/MSR5jhDC/2q6DgLz+nrA6LYCDYWNEvQ=

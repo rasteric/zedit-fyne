@@ -13,7 +13,7 @@ func main() {
 	ed := zedit.NewZGrid(80, 40)
 	ed.ShowLineNumbers = true
 	s := ""
-	for i := 0; i < 1000; i++ {
+	for i := 0; i < 100; i++ {
 		s += lorem.Sentence(5, 15)
 		s += "\n"
 	}

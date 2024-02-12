@@ -97,8 +97,9 @@ type TagStyleFunc func(c widget.TextGridCell) widget.TextGridCell
 type TagLineStyleFunc func(style widget.TextGridStyle) widget.TextGridStyle
 
 type TagStyler struct {
-	Tag       Tag
-	StyleFunc TagStyleFunc
+	Tag          Tag
+	StyleFunc    TagStyleFunc
+	DrawFullLine bool
 }
 
 type LineStyler struct {

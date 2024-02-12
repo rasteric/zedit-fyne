@@ -1,10 +1,15 @@
 module github.com/rasteric/zedit-fyne
 
-go 1.21.4
+go 1.22
 
 require (
-	fyne.io/fyne/v2 v2.4.3 // indirect
-	github.com/chewxy/math32 v1.10.1 // indirect
+	fyne.io/fyne/v2 v2.4.3
+	github.com/chewxy/math32 v1.10.1
+	github.com/muesli/gamut v0.3.1
+	github.com/rdleal/intervalst v1.2.2
+)
+
+require (
 	github.com/fredbi/uri v1.0.0 // indirect
 	github.com/fyne-io/gl-js v0.0.0-20220119005834-d2da28d9ccfe // indirect
 	github.com/go-gl/gl v0.0.0-20211210172815-726fda9656d6 // indirect
@@ -13,10 +18,7 @@ require (
 	github.com/gopherjs/gopherjs v1.17.2 // indirect
 	github.com/lucasb-eyer/go-colorful v1.2.0 // indirect
 	github.com/muesli/clusters v0.0.0-20200529215643-2700303c1762 // indirect
-	github.com/muesli/gamut v0.3.1 // indirect
 	github.com/muesli/kmeans v0.3.1 // indirect
-	github.com/rasteric/flags v0.0.0-20191029113133-ef59ddff9f98 // indirect
-	github.com/rdleal/intervalst v1.2.2 // indirect
 	github.com/srwiley/oksvg v0.0.0-20221011165216-be6e8873101c // indirect
 	github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef // indirect
 	github.com/xrash/smetrics v0.0.0-20201216005158-039620a65673 // indirect

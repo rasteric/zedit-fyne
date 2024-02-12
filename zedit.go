@@ -3,9 +3,9 @@ package zedit
 import (
 	"context"
 	"fmt"
-	"log"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -18,6 +18,15 @@ import (
 	"fyne.io/fyne/v2/widget"
 	"github.com/chewxy/math32"
 	"github.com/muesli/gamut"
+)
+
+type CaretMovement int
+
+const (
+	CaretDown CaretMovement = iota + 1
+	CaretUp
+	CaretLeft
+	CaretRight
 )
 
 type FixedSpacer struct {
@@ -72,14 +81,15 @@ func (r *FixedSpacerRenderer) Refresh() {}
 
 type ZGrid struct {
 	widget.BaseWidget
-	Rows            []widget.TextGridRow
-	Tags            *TagContainer
-	Lines           int
-	Columns         int
-	ShowLineNumbers bool
-	ShowWhitespace  bool
-	ScrollFactor    float32
-	TabWidth        int // If set to 0 the fyne.DefaultTabWidth is used
+	Rows               []widget.TextGridRow
+	Tags               *TagContainer
+	Lines              int
+	Columns            int
+	ShowLineNumbers    bool
+	ShowWhitespace     bool
+	ScrollFactor       float32
+	TabWidth           int // If set to 0 the fyne.DefaultTabWidth is used
+	MinRefreshInterval time.Duration
 	// text cursor
 	DrawCaret            bool
 	CaretBlinkDelay      time.Duration
@@ -108,7 +118,14 @@ type ZGrid struct {
 	content         *fyne.Container
 	selStart        *CharPos
 	selEnd          *CharPos
-	refreshCancel   func()
+	shortcuts       map[string]fyne.KeyboardShortcut
+	handlers        map[string]func(z *ZGrid)
+	keyHandlers     map[fyne.KeyName]func(z *ZGrid)
+	// delayed refresh
+	refresher     func()
+	lastRefreshed time.Time
+	// synchronization
+	mutex sync.RWMutex
 }
 
 // ZGrid is like TextGrid but with an internal vertical scroll bar and an optional line number display.
@@ -117,11 +134,16 @@ func NewZGrid(columns, lines int) *ZGrid {
 	fgcolor := theme.BackgroundColor()
 	if fyne.CurrentApp().Settings().ThemeVariant() == theme.VariantDark {
 		fgcolor = gamut.Tints(fgcolor, 8)[2]
-		fmt.Println("DARK THEME")
 	} else {
 		fgcolor = gamut.Darker(fgcolor, 0.2)
 	}
 	z := ZGrid{Lines: lines, Columns: columns, grid: widget.NewTextGrid()}
+	z.grid = widget.NewTextGrid()
+	z.initInternalGrid()
+	z.MinRefreshInterval = 10 * time.Millisecond
+	z.shortcuts = make(map[string]fyne.KeyboardShortcut)
+	z.handlers = make(map[string]func(z *ZGrid))
+	z.keyHandlers = make(map[fyne.KeyName]func(z *ZGrid))
 	z.CaretBlinkDelay = 3 * time.Second
 	z.CaretOnDuration = 600 * time.Millisecond
 	z.CaretOffDuration = 200 * time.Millisecond
@@ -130,24 +152,16 @@ func NewZGrid(columns, lines int) *ZGrid {
 	z.caretState = 1
 	_, z.caretBlinkCancel = context.WithCancel(context.Background())
 	z.invertedDefaultStyle = &widget.CustomTextGridStyle{FGColor: theme.InputBackgroundColor(), BGColor: theme.ForegroundColor()}
-	z.refreshCancel = func() {}
 	z.Tags = NewTagContainer()
 	z.ScrollFactor = 2.0
 	z.defaultStyle = &widget.CustomTextGridStyle{FGColor: theme.ForegroundColor(), BGColor: theme.InputBackgroundColor()}
 	z.lineNumberStyle = &widget.CustomTextGridStyle{FGColor: fgcolor, BGColor: bgcolor}
-	z.grid = widget.NewTextGrid()
 	z.background = canvas.NewRectangle(theme.InputBackgroundColor()) //theme.InputBackgroundColor())
 	z.background.StrokeColor = theme.FocusColor()
 	z.background.StrokeWidth = 4
 	z.lineNumberGrid = widget.NewTextGrid()
 	z.charSize = fyne.MeasureText("M", theme.TextSize(), fyne.TextStyle{Monospace: true})
-	s := ""
-	for i := 0; i < lines; i++ {
-		for j := 0; j < columns; j++ {
-			s += " "
-		}
-		s += "\n"
-	}
+
 	z.vSpacer = NewFixedSpacer(fyne.Size{Width: 0, Height: float32(z.Lines) * z.charSize.Height})
 
 	z.scroll = container.NewScroll(z.vSpacer)
@@ -157,12 +171,25 @@ func NewZGrid(columns, lines int) *ZGrid {
 		z.hasFocus = true
 		z.Refresh()
 	}
-	z.SetText(s)
 	z.border = container.NewBorder(nil, nil, z.lineNumberGrid, z.scroll, z.grid)
 	z.content = container.New(layout.NewStackLayout(), z.background, z.border)
-	z.Tags.AddStyler(TagStyler{Tag: SimpleTag{"selection"}, StyleFunc: z.SelectionStyleFunc()})
+	z.Tags.AddStyler(TagStyler{Tag: SimpleTag{"selection"}, StyleFunc: z.SelectionStyleFunc(), DrawFullLine: true})
+	z.SetText(" ")
 	z.BlinkCaret(true)
+	z.addDefaultShortcuts()
 	return &z
+}
+
+// initInternalGrid initializes the internal grid (z.grid) to all spaces Lines x Columns.
+// This grid is only used for display and may never change! It's like a VRAM fixed character display.
+func (z *ZGrid) initInternalGrid() {
+	z.grid.Rows = make([]widget.TextGridRow, z.Lines)
+	for i := range z.grid.Rows {
+		z.grid.Rows[i].Cells = make([]widget.TextGridCell, z.Columns)
+		for j := range z.grid.Rows[i].Cells {
+			z.grid.Rows[i].Cells[j].Rune = ' '
+		}
+	}
 }
 
 func (z *ZGrid) SetLineNumberStyle(style *widget.CustomTextGridStyle) {
@@ -364,30 +391,31 @@ func (z *ZGrid) Dragged(evt *fyne.DragEvent) {
 	z.Tags.Upsert(tag, interval)
 	if pos.Line <= z.lineOffset {
 		z.ScrollUp()
+		return
 	} else if pos.Line >= z.lineOffset+z.Lines-1 {
 		z.ScrollDown()
+		return
 	}
 	z.Refresh()
 }
 
 func (z *ZGrid) Cursor() desktop.Cursor {
-	return desktop.TextCursor
+	if z.selStart != nil {
+		return desktop.TextCursor
+	}
+	return desktop.DefaultCursor
 }
 
 func (z *ZGrid) Tapped(evt *fyne.PointEvent) {
 	z.RemoveSelection()
+	pos := z.PosToCharPos(evt.Position)
+	z.SetCaret(pos)
 }
 
 func (z *ZGrid) DragEnd() {
 	z.selStart = nil
 	z.selEnd = nil
 }
-
-func (z *ZGrid) TypedRune(rune) {
-	z.lastInteraction = time.Now()
-}
-
-func (z *ZGrid) TypedKey(evt *fyne.KeyEvent) {}
 
 // SELECTION HANDLING
 
@@ -438,45 +466,126 @@ func (z *ZGrid) SetText(s string) {
 	z.Refresh()
 }
 
-func (z *ZGrid) TypedShortcut(s fyne.Shortcut) {
-	if sc, ok := s.(*desktop.CustomShortcut); ok {
-		if sc.Modifier == fyne.KeyModifierAlt {
-			switch sc.KeyName {
-			case fyne.KeyRight:
-				z.ScrollRight(4)
-			case fyne.KeyLeft:
-				z.ScrollLeft(4)
-			}
-		}
+// KEY HANDLING
+
+func (z *ZGrid) TypedRune(rune) {
+	z.lastInteraction = time.Now()
+}
+
+func (z *ZGrid) TypedKey(evt *fyne.KeyEvent) {
+	if handler, ok := z.keyHandlers[evt.Name]; ok {
+		z.lastInteraction = time.Now()
+		handler(z)
 	}
 }
+
+func (z *ZGrid) TypedShortcut(s fyne.Shortcut) {
+	if handler, ok := z.handlers[s.ShortcutName()]; ok {
+		z.lastInteraction = time.Now()
+		handler(z)
+	}
+}
+
+// AddhortcutHandler adds a keyboard shortcut to the grid.
+func (z *ZGrid) AddShortcutHandler(s fyne.KeyboardShortcut, handler func(z *ZGrid)) {
+	z.shortcuts[s.ShortcutName()] = s
+	z.handlers[s.ShortcutName()] = handler
+}
+
+// RemoveShortcutHandler removes the keyboard shortcut handler with the given name.
+func (z *ZGrid) RemoveShortcutHandler(s string) {
+	delete(z.shortcuts, s)
+	delete(z.handlers, s)
+}
+
+// AddKeyHandler adds a direct handler for the given key. Unlike AddShortcutHandler, a key handler
+// is called whenever the key is pressed, even when no modifier is used.
+func (z *ZGrid) AddKeyHandler(key fyne.KeyName, handler func(z *ZGrid)) {
+	z.keyHandlers[key] = handler
+}
+
+// RemoveKeyHandler removes the handler for the given key.
+func (z *ZGrid) RemoveKeyHandler(key fyne.KeyName) {
+	delete(z.keyHandlers, key)
+}
+
+// addDefaultShortcuts adds a few standard shortcuts that will rarely need to be changed.
+func (z *ZGrid) addDefaultShortcuts() {
+	z.AddKeyHandler(fyne.KeyDown, func(z *ZGrid) {
+		z.MoveCaret(CaretDown)
+	})
+	z.AddKeyHandler(fyne.KeyUp, func(z *ZGrid) {
+		z.MoveCaret(CaretUp)
+	})
+	z.AddKeyHandler(fyne.KeyLeft, func(z *ZGrid) {
+		z.MoveCaret(CaretLeft)
+	})
+	z.AddKeyHandler(fyne.KeyRight, func(z *ZGrid) {
+		z.MoveCaret(CaretRight)
+	})
+}
+
+// LAYOUT UPDATING
 
 func (z *ZGrid) Refresh() {
-	z.refreshCancel()
-	var ctx context.Context
-	ctx, z.refreshCancel = context.WithCancel(context.Background())
-	z.refreshProc(ctx)
+	z.mutex.RLock()
+	last := z.lastRefreshed
+	fn := z.refresher
+	interval := z.MinRefreshInterval
+	z.mutex.RUnlock()
+	if time.Now().Sub(last) >= interval {
+		z.mutex.Lock()
+		z.refresher = func() {
+			z.lastRefreshed = time.Now()
+			z.refreshProc()
+		}
+		z.mutex.Unlock()
+		defer func() {
+			z.mutex.Lock()
+			z.refresher = nil
+			z.mutex.Unlock()
+		}()
+		z.mutex.RLock()
+		defer z.mutex.RUnlock()
+		z.refresher()
+		return
+	}
+	if fn != nil {
+		return
+	}
+	go func() {
+		time.Sleep(interval)
+		z.Refresh()
+	}()
 }
 
-func (z *ZGrid) refreshProc(ctx context.Context) {
-	if z.Rows != nil && len(z.Rows) > z.lineOffset {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			z.grid.Rows = z.Rows[z.lineOffset:min(z.lineOffset+z.Lines, len(z.Rows))]
-			for i, row := range z.grid.Rows {
-				l := len(row.Cells)
-				k := max(0, min(l-1, z.columnOffset))
-				m := min(l, z.columnOffset+z.Columns)
-				row.Cells = row.Cells[k:m]
-				for j := range row.Cells {
-					row.Cells[j] = widget.TextGridCell{Rune: row.Cells[j].Rune, Style: nil}
-				}
-				z.grid.SetRow(i, row)
+func (z *ZGrid) refreshProc() {
+	defer func() {
+		z.lastInteraction = time.Now()
+		z.maybeDrawCaret()
+	}()
+outer:
+	for i := range z.Lines {
+		if i+z.lineOffset >= len(z.Rows) {
+			z.grid.Rows[i].Style = nil
+			for j := range z.Columns {
+				z.grid.Rows[i].Cells[j].Rune = ' '
+				z.grid.Rows[i].Cells[j].Style = nil
 			}
+			continue outer
+		}
+	inner:
+		for j := range z.Columns {
+			if j+z.columnOffset >= len(z.Rows[i+z.lineOffset].Cells) {
+				z.grid.Rows[i].Cells[j].Rune = ' '
+				z.grid.Rows[i].Cells[j].Style = nil
+				continue inner
+			}
+			z.grid.Rows[i].Cells[j].Rune = z.Rows[i+z.lineOffset].Cells[j+z.columnOffset].Rune
+			z.grid.Rows[i].Cells[j].Style = nil
 		}
 	}
+
 	if z.ShowLineNumbers {
 		z.lineNumberGrid.Hidden = false
 		// add line numbers if necessary
@@ -484,103 +593,61 @@ func (z *ZGrid) refreshProc(ctx context.Context) {
 		fmtStr := "%" + ll + "d "
 		c := z.lineOffset
 		for i := 0; i < z.Lines; i++ {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				c++
-				s := []rune(fmt.Sprintf(fmtStr, c))
-				for j := 0; j < len(s); j++ {
-					if c < len(z.Rows) {
-						z.lineNumberGrid.SetCell(i, j, widget.TextGridCell{Rune: s[j], Style: z.lineNumberStyle})
-					} else {
-						z.lineNumberGrid.SetCell(i, j, widget.TextGridCell{Rune: ' ', Style: z.lineNumberStyle})
-					}
+			c++
+			s := []rune(fmt.Sprintf(fmtStr, c))
+			for j := 0; j < len(s); j++ {
+				if c < len(z.Rows) {
+					z.lineNumberGrid.SetCell(i, j, widget.TextGridCell{Rune: s[j], Style: z.lineNumberStyle})
+				} else {
+					z.lineNumberGrid.SetCell(i, j, widget.TextGridCell{Rune: ' ', Style: z.lineNumberStyle})
 				}
 			}
 		}
 	}
 	if z.Tags.lineStylers != nil {
 		for i := len(z.Tags.stylers) - 1; i >= 0; i-- {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				styler := z.Tags.lineStylers[i]
-				interval, ok := z.Tags.Lookup(styler.Tag)
-				if !ok {
-					continue
-				}
-				log.Println(styler.Tag)
-				z.maybeStyleLineRange(interval, styler.LineStyleFunc)
+			styler := z.Tags.lineStylers[i]
+			interval, ok := z.Tags.Lookup(styler.Tag)
+			if !ok {
+				continue
 			}
+			z.maybeStyleLineRange(interval, styler.LineStyleFunc)
 		}
 	}
 	if z.Tags.stylers != nil {
 		for i := len(z.Tags.stylers) - 1; i >= 0; i-- {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				styler := z.Tags.stylers[i]
-				interval, ok := z.Tags.Lookup(styler.Tag)
-				if !ok {
-					continue
-				}
-				log.Printf("styling %v\n", styler.Tag)
-				z.maybeStyleRange(interval, styler.StyleFunc)
+			styler := z.Tags.stylers[i]
+			interval, ok := z.Tags.Lookup(styler.Tag)
+			if !ok {
+				continue
 			}
+			z.maybeStyleRange(interval, styler.StyleFunc, styler.DrawFullLine)
 		}
 	}
-	select {
-	case <-ctx.Done():
-		return
-	default:
-		z.lineNumberGrid.Refresh()
-		z.grid.Refresh()
-	}
+	z.lineNumberGrid.Refresh()
+	z.grid.Refresh()
 }
 
 // curreentViewport is the char interval that is currently displayed
 func (z *ZGrid) currentViewport() CharInterval {
 	endLine := min(len(z.Rows)-1, z.lineOffset+z.Lines-1)
 	endColumn := len(z.Rows[endLine].Cells) - 1
-	return CharInterval{Start: CharPos{Line: z.lineOffset, Column: 0}, End: CharPos{Line: endLine, Column: endColumn}}
-}
-
-// maybeStyleRange styles the given char interval by style insofar as it is within
-// the visible range of the underlying TextGrid (otherwise, nothing is done).
-func (z *ZGrid) maybeStyleRange(interval CharInterval, styler TagStyleFunc) {
-	viewPort := z.currentViewport()
-	if interval.OutsideOf(viewPort) {
-		return
-	}
-	rangeStart := MaxPos(viewPort.Start, interval.Start)
-	rangeEnd := MinPos(viewPort.End, interval.End)
-	for i := rangeStart.Line; i <= rangeEnd.Line; i++ {
-		startCol := 0
-		if i == rangeStart.Line {
-			startCol = rangeStart.Column
-		}
-		endCol := len(z.Rows[i].Cells) - 1
-		if i == rangeEnd.Line {
-			endCol = min(endCol, rangeEnd.Column)
-		}
-		for j := startCol; j <= endCol; j++ {
-			z.grid.SetCell(i-z.lineOffset, j, styler(z.grid.Rows[i-z.lineOffset].Cells[j]))
-		}
-	}
+	return CharInterval{Start: CharPos{Line: z.lineOffset, Column: 0},
+		End: CharPos{Line: endLine, Column: endColumn}}
 }
 
 // CARET HANDLING
 
 // drawCaret draws the text cursor if necessary.
-func (z *ZGrid) maybeDrawCaret() {
+func (z *ZGrid) maybeDrawCaret() bool {
 	if !z.DrawCaret || !z.currentViewport().Contains(z.CaretPos) {
-		return
+		return false
 	}
 	line := z.CaretPos.Line - z.lineOffset
-	col := min(len(z.grid.Rows[line].Cells)-1, z.CaretPos.Column)
+	col := z.CaretPos.Column - z.columnOffset
+	if line < 0 || line > len(z.grid.Rows)-1 || col < 0 || col > len(z.grid.Rows[line].Cells)-1 {
+		return false
+	}
 	switch atomic.LoadUint32(&z.caretState) {
 	case 2:
 		z.grid.Rows[line].Cells[col].Style = z.invertedDefaultStyle
@@ -590,6 +657,7 @@ func (z *ZGrid) maybeDrawCaret() {
 		z.grid.Rows[line].Cells[col].Style = z.Rows[z.CaretPos.Line].Cells[col].Style
 	}
 	z.grid.Refresh()
+	return true
 }
 
 // BlinkCursor starts blinking the cursor or stops the cursor from blinking.
@@ -631,6 +699,111 @@ func (z *ZGrid) BlinkCaret(on bool) {
 // use BlinkCursor to switch blinking on or off.
 func (z *ZGrid) HasBlinkingCaret() bool {
 	return atomic.LoadUint32(&z.hasCaretBlinking) > 0
+}
+
+// CaretOff switches the caret off temporarily. It returns true was blinking.
+func (z *ZGrid) CaretOff() bool {
+	blinking := z.HasBlinkingCaret()
+	z.caretBlinkCancel()
+	z.caretState = 0
+	z.DrawCaret = false
+	z.Refresh()
+	return blinking
+}
+
+// CaretOn switches the caret on again after it has been switched off.
+func (z *ZGrid) CaretOn(blinking bool) {
+	z.DrawCaret = true
+	z.caretState = 2
+	z.BlinkCaret(blinking)
+	z.Refresh()
+}
+
+func (z *ZGrid) SetCaret(pos CharPos) {
+	drawCaret := z.DrawCaret
+	blinking := z.CaretOff()
+	defer func() {
+		if drawCaret {
+			z.CaretOn(blinking)
+		}
+	}()
+	z.CaretPos = pos
+}
+
+// MoveCaret moves the caret according to the given movement direction, which may be one of
+// CaretUp, CaretDown, CaretLeft, and CaretRight.
+func (z *ZGrid) MoveCaret(dir CaretMovement) {
+	drawCaret := z.DrawCaret
+	blinking := z.CaretOff()
+	defer func() {
+		if drawCaret {
+			z.CaretOn(blinking)
+		}
+	}()
+	switch dir {
+	case CaretDown:
+		z.CaretPos = CharPos{Line: min(z.CaretPos.Line+1, len(z.Rows)-1), Column: z.CaretPos.Column}
+		if z.CaretPos.Line == z.lineOffset+z.Lines {
+			z.ScrollDown()
+			return
+		}
+	case CaretUp:
+		z.CaretPos = CharPos{Line: max(z.CaretPos.Line-1, 0), Column: z.CaretPos.Column}
+		if z.CaretPos.Line == z.lineOffset-1 {
+			z.ScrollUp()
+			return
+		}
+	case CaretLeft:
+		if z.CaretPos.Column == 0 {
+			z.MoveCaret(CaretUp)
+			z.CaretPos = CharPos{Line: z.CaretPos.Line, Column: len(z.Rows[z.CaretPos.Line].Cells) - 1}
+			if z.CaretPos.Column > z.columnOffset+z.Columns {
+				z.columnOffset = z.CaretPos.Column - z.Columns/2
+			}
+			return
+		}
+		z.CaretPos = CharPos{Line: z.CaretPos.Line, Column: z.CaretPos.Column - 1}
+		if z.CaretPos.Column < z.columnOffset {
+			z.ScrollLeft(z.Columns / 2)
+		}
+	case CaretRight:
+		if z.CaretPos.Column >= len(z.Rows[z.CaretPos.Line].Cells)-1 {
+			z.CaretPos = CharPos{Line: z.CaretPos.Line, Column: 0}
+			z.columnOffset = 0
+			z.MoveCaret(CaretDown)
+			return
+		}
+		z.CaretPos = CharPos{Line: z.CaretPos.Line, Column: z.CaretPos.Column + 1}
+		if z.CaretPos.Column >= z.columnOffset+z.Columns {
+			z.ScrollRight(z.Columns / 2)
+		}
+	}
+}
+
+// STYLES
+
+// maybeStyleRange styles the given char interval by style insofar as it is within
+// the visible range of the underlying TextGrid (otherwise, nothing is done).
+func (z *ZGrid) maybeStyleRange(interval CharInterval, styler TagStyleFunc, drawFullLine bool) {
+	if z.currentViewport().OutsideOf(interval) {
+		return
+	}
+	for i := range z.Lines {
+		xi := i + z.lineOffset
+		if xi >= len(z.Rows) {
+			break
+		}
+		for j := range z.Columns {
+			xj := j + z.columnOffset
+			if interval.Contains(CharPos{Line: xi, Column: xj}) {
+				if xj < len(z.Rows[xi].Cells) {
+					z.grid.SetCell(i, j, styler(z.Rows[xi].Cells[xj]))
+				} else if drawFullLine {
+					z.grid.SetCell(i, j, styler(z.grid.Rows[i].Cells[j]))
+				}
+			}
+		}
+	}
 }
 
 // maybeStyleLineRange is the same as maybeStyleRange except that a TagLineStyleFunc
