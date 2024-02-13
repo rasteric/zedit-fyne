@@ -137,7 +137,7 @@ func NewZGrid(columns, lines int) *ZGrid {
 	} else {
 		fgcolor = gamut.Darker(fgcolor, 0.2)
 	}
-	z := ZGrid{Lines: lines, Columns: columns, grid: widget.NewTextGrid()}
+	z := ZGrid{Lines: lines, Columns: columns + 1, grid: widget.NewTextGrid()}
 	z.grid = widget.NewTextGrid()
 	z.initInternalGrid()
 	z.MinRefreshInterval = 10 * time.Millisecond
@@ -436,7 +436,45 @@ func (z *ZGrid) PosToCharPos(pos fyne.Position) CharPos {
 	if z.lineNumberGrid.Visible() && pos.X < z.lineNumberGrid.Size().Width {
 		return CharPos{z.lineOffset + int(y/z.charSize.Height), 0.0, true}
 	}
-	return CharPos{z.lineOffset + int(y/z.charSize.Height), int(math32.Trunc(x / z.charSize.Width)), false}
+	row := z.lineOffset + int(y/z.charSize.Height)
+	s := z.GetLineText(row)
+	if z.columnOffset > 0 {
+		s = substring(s, z.columnOffset, len(s))
+	}
+	column := z.findCharColumn(s, x)
+	return CharPos{row, column + z.columnOffset, false}
+}
+
+// findCharColumn goes through a line explicitly and measures the position of each char in order to
+// precisely determine a char position based on an x-coordinate. The original code was:
+//
+//	CharPos{z.lineOffset + int(y/z.charSize.Height), int(math32.Round(x / z.charSize.Width)), false}
+//
+// This is extremely imprecise because every character has a different width.
+func (z *ZGrid) findCharColumn(s string, x float32) int {
+	var sb strings.Builder
+	offset := float32(0)
+	for pos, char := range s {
+		sb.WriteRune(char)
+		size := fyne.MeasureText(sb.String(), theme.TextSize(), fyne.TextStyle{Monospace: true})
+		if size.Width-offset > x {
+			return max(0, pos-1)
+		}
+		offset = offset + 0.4 // TODO CHANGE! This drift value is based on experimentation! Where does it come from?
+	}
+	return len(s) - 1
+}
+
+// GetLineText obtains the text of a single line. The empty string is returned if there is no valid line.
+func (z *ZGrid) GetLineText(row int) string {
+	if row < 0 || row >= len(z.Rows) {
+		return ""
+	}
+	var s strings.Builder
+	for i := 0; i < len(z.Rows[row].Cells); i++ {
+		s.WriteRune(z.Rows[row].Cells[i].Rune)
+	}
+	return s.String()
 }
 
 func (z *ZGrid) MinSize() fyne.Size {
@@ -453,12 +491,13 @@ func (z *ZGrid) SetText(s string) {
 		if len(line) > z.maxLineLen {
 			z.maxLineLen = len(line)
 		}
-		cells := make([]widget.TextGridCell, len(line))
+		cells := make([]widget.TextGridCell, len(line)+1)
 		c := 0
 		for _, char := range line {
 			cells[c].Rune = char
 			c++
 		}
+		cells[c].Rune = ' '
 		z.Rows[i] = widget.TextGridRow{Cells: cells, Style: nil}
 	}
 
@@ -856,9 +895,17 @@ func (r *zgridRenderer) Refresh() {
 	r.zgrid.Refresh()
 }
 
-// func (z *ZGrid) InvertStyle(style widget.TextGridStyle) widget.TextGridStyle {
-// 	if style == nil {
-// 		return z.invertedDefaultStyle
-// 	}
-// 	return &widget.CustomTextGridStyle{FGColor: style.BackgroundColor(), BGColor: style.TextColor()}
-// }
+func substring(s string, start int, end int) string {
+	start_str_idx := 0
+	i := 0
+	for j := range s {
+		if i == start {
+			start_str_idx = j
+		}
+		if i == end {
+			return s[start_str_idx:j]
+		}
+		i++
+	}
+	return s[start_str_idx:]
+}
