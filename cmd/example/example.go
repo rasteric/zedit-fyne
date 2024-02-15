@@ -12,6 +12,7 @@ func main() {
 	// w.SetFixedSize(true)
 	ed := zedit.NewZGrid(80, 40)
 	ed.ShowLineNumbers = true
+	ed.AddEmacsShortcuts()
 	s := ""
 	for i := 0; i < 100; i++ {
 		s += lorem.Sentence(5, 15)

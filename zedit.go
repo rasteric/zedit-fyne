@@ -27,6 +27,14 @@ const (
 	CaretUp
 	CaretLeft
 	CaretRight
+	CaretHome
+	CaretEnd
+	CaretLineStart
+	CaretLineEnd
+	CaretHalfPageDown
+	CaretHalfPageUp
+	CaretPageDown
+	CaretPageUp
 )
 
 type FixedSpacer struct {
@@ -87,9 +95,10 @@ type ZGrid struct {
 	Columns            int
 	ShowLineNumbers    bool
 	ShowWhitespace     bool
-	ScrollFactor       float32
-	TabWidth           int // If set to 0 the fyne.DefaultTabWidth is used
-	MinRefreshInterval time.Duration
+	ScrollFactor       float32       // speed of scrolling
+	TabWidth           int           // If set to 0 the fyne.DefaultTabWidth is used
+	MinRefreshInterval time.Duration // minimum interval in ms to refresh display
+	CharDrift          float32       // default 0.4, added to calculation per char when finding char position from x-position
 	// text cursor
 	DrawCaret            bool
 	CaretBlinkDelay      time.Duration
@@ -138,6 +147,7 @@ func NewZGrid(columns, lines int) *ZGrid {
 		fgcolor = gamut.Darker(fgcolor, 0.2)
 	}
 	z := ZGrid{Lines: lines, Columns: columns + 1, grid: widget.NewTextGrid()}
+	z.CharDrift = 0.4
 	z.grid = widget.NewTextGrid()
 	z.initInternalGrid()
 	z.MinRefreshInterval = 10 * time.Millisecond
@@ -209,16 +219,33 @@ func (z *ZGrid) SelectionStyleFunc() TagStyleFunc {
 // SetTopLine sets the zgrid to display starting with the given line number.
 func (z *ZGrid) SetTopLine(x int) {
 	z.lineOffset = x
-	z.Refresh()
 	if z.scroll != nil {
 		pos := z.scroll.Offset
 		z.scroll.Offset = fyne.Position{X: pos.X, Y: max(0, z.charSize.Height*float32(z.lineOffset))}
 	}
+	z.Refresh()
+	z.scroll.Refresh()
+}
+
+// CenterLineOnCaret adjusts the displayed lines such that the caret is in the center of the grid.
+func (z *ZGrid) CenterLineOnCaret() {
+	line := z.CaretPos.Line
+	z.SetTopLine(min(z.LastLine()-z.Lines, max(0, line-z.Lines/2)))
+}
+
+// LastLine returns the last line (0-indexed).
+func (z *ZGrid) LastLine() int {
+	return len(z.Rows) - 1
+}
+
+// LastColumn returns the last column of the given line (both 0-indexed).
+func (z *ZGrid) LastColumn(n int) int {
+	return len(z.Rows[n].Cells) - 1
 }
 
 // Row returns the row at line i. The row returned is not a copy but the original.
 func (z *ZGrid) Row(i int) widget.TextGridRow {
-	if i < 0 || i >= len(z.Rows) {
+	if i < 0 || i > z.LastLine() {
 		return widget.TextGridRow{}
 	}
 	return z.Rows[i]
@@ -226,7 +253,7 @@ func (z *ZGrid) Row(i int) widget.TextGridRow {
 
 // RowText returns the text of the row at i, the empty string if i is out of bounds.
 func (z *ZGrid) RowText(i int) string {
-	if i < 0 || i >= len(z.Rows) {
+	if i < 0 || i > z.LastLine() {
 		return ""
 	}
 	var sb strings.Builder
@@ -243,7 +270,7 @@ func (z *ZGrid) SetCell(pos CharPos, cell widget.TextGridCell) {
 
 // SetRow sets the zgrid row. If row is beyond the current size, empty rows are added accordingly.
 func (z *ZGrid) SetRow(row int, content widget.TextGridRow) {
-	if row >= len(z.Rows) {
+	if row > z.LastLine() {
 		rows := make([]widget.TextGridRow, row-len(z.Rows)+1)
 		z.Rows = append(z.Rows, rows...)
 	}
@@ -460,14 +487,14 @@ func (z *ZGrid) findCharColumn(s string, x float32) int {
 		if size.Width-offset > x {
 			return max(0, pos-1)
 		}
-		offset = offset + 0.4 // TODO CHANGE! This drift value is based on experimentation! Where does it come from?
+		offset = offset + z.CharDrift // TODO CHANGE! ad hoc value
 	}
 	return len(s) - 1
 }
 
 // GetLineText obtains the text of a single line. The empty string is returned if there is no valid line.
 func (z *ZGrid) GetLineText(row int) string {
-	if row < 0 || row >= len(z.Rows) {
+	if row < 0 || row > z.LastLine() {
 		return ""
 	}
 	var s strings.Builder
@@ -484,7 +511,6 @@ func (z *ZGrid) MinSize() fyne.Size {
 
 func (z *ZGrid) SetText(s string) {
 	lines := strings.Split(s, "\n")
-
 	// populate the text grid
 	z.Rows = make([]widget.TextGridRow, len(lines))
 	for i, line := range lines {
@@ -562,6 +588,66 @@ func (z *ZGrid) addDefaultShortcuts() {
 	z.AddKeyHandler(fyne.KeyRight, func(z *ZGrid) {
 		z.MoveCaret(CaretRight)
 	})
+	z.AddKeyHandler(fyne.KeyHome, func(z *ZGrid) {
+		z.MoveCaret(CaretHome)
+	})
+	z.AddKeyHandler(fyne.KeyEnd, func(z *ZGrid) {
+		z.MoveCaret(CaretEnd)
+	})
+	z.AddKeyHandler(fyne.KeyPageDown, func(z *ZGrid) {
+		z.MoveCaret(CaretHalfPageDown)
+	})
+	z.AddKeyHandler(fyne.KeyPageUp, func(z *ZGrid) {
+		z.MoveCaret(CaretHalfPageUp)
+	})
+	// shortcuts
+	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.KeyPageDown, Modifier: fyne.KeyModifierControl},
+		func(z *ZGrid) {
+			z.MoveCaret(CaretPageDown)
+		})
+	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.KeyPageUp, Modifier: fyne.KeyModifierControl},
+		func(z *ZGrid) {
+			z.MoveCaret(CaretPageUp)
+		})
+}
+
+// AddEmacsShortcuts adds some (very basic) Emacs shortcuts such as Ctrl-Q, Ctrl-E, and Ctrl-P and Ctrl-N.
+// This interferes with standard shortcuts such as Ctrl-Q for Quit, and so it is only suitable for people
+// used to Emacs.
+func (z *ZGrid) AddEmacsShortcuts() {
+	// shortcuts
+	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.KeyE, Modifier: fyne.KeyModifierControl},
+		func(z *ZGrid) {
+			z.MoveCaret(CaretLineEnd)
+		})
+	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.KeyQ, Modifier: fyne.KeyModifierControl},
+		func(z *ZGrid) {
+			z.MoveCaret(CaretLineStart)
+		})
+	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.KeyN, Modifier: fyne.KeyModifierControl},
+		func(z *ZGrid) {
+			z.MoveCaret(CaretDown)
+		})
+	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.KeyP, Modifier: fyne.KeyModifierControl},
+		func(z *ZGrid) {
+			z.MoveCaret(CaretUp)
+		})
+	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.KeyF, Modifier: fyne.KeyModifierControl},
+		func(z *ZGrid) {
+			z.MoveCaret(CaretRight)
+		})
+	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.KeyB, Modifier: fyne.KeyModifierControl},
+		func(z *ZGrid) {
+			z.MoveCaret(CaretLeft)
+		})
+	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.KeyV, Modifier: fyne.KeyModifierControl},
+		func(z *ZGrid) {
+			z.MoveCaret(CaretHalfPageDown)
+		})
+	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.KeyV, Modifier: fyne.KeyModifierAlt},
+		func(z *ZGrid) {
+			z.MoveCaret(CaretHalfPageUp)
+		})
 }
 
 // LAYOUT UPDATING
@@ -635,7 +721,7 @@ outer:
 			c++
 			s := []rune(fmt.Sprintf(fmtStr, c))
 			for j := 0; j < len(s); j++ {
-				if c < len(z.Rows) {
+				if c-1 <= z.LastLine() {
 					z.lineNumberGrid.SetCell(i, j, widget.TextGridCell{Rune: s[j], Style: z.lineNumberStyle})
 				} else {
 					z.lineNumberGrid.SetCell(i, j, widget.TextGridCell{Rune: ' ', Style: z.lineNumberStyle})
@@ -679,14 +765,11 @@ func (z *ZGrid) currentViewport() CharInterval {
 
 // drawCaret draws the text cursor if necessary.
 func (z *ZGrid) maybeDrawCaret() bool {
-	if !z.DrawCaret || !z.currentViewport().Contains(z.CaretPos) {
+	if !z.DrawCaret {
 		return false
 	}
-	line := z.CaretPos.Line - z.lineOffset
-	col := z.CaretPos.Column - z.columnOffset
-	if line < 0 || line > len(z.grid.Rows)-1 || col < 0 || col > len(z.grid.Rows[line].Cells)-1 {
-		return false
-	}
+	line := SafePositiveValue(z.CaretPos.Line-z.lineOffset, len(z.grid.Rows)-1)
+	col := SafePositiveValue(z.CaretPos.Column-z.columnOffset, len(z.grid.Rows[line].Cells)-1)
 	switch atomic.LoadUint32(&z.caretState) {
 	case 2:
 		z.grid.Rows[line].Cells[col].Style = z.invertedDefaultStyle
@@ -777,6 +860,7 @@ func (z *ZGrid) MoveCaret(dir CaretMovement) {
 	defer func() {
 		if drawCaret {
 			z.CaretOn(blinking)
+			z.maybeDrawCaret()
 		}
 	}()
 	switch dir {
@@ -794,6 +878,9 @@ func (z *ZGrid) MoveCaret(dir CaretMovement) {
 		}
 	case CaretLeft:
 		if z.CaretPos.Column == 0 {
+			if z.CaretPos.Line == 0 {
+				return
+			}
 			z.MoveCaret(CaretUp)
 			z.CaretPos = CharPos{Line: z.CaretPos.Line, Column: len(z.Rows[z.CaretPos.Line].Cells) - 1}
 			if z.CaretPos.Column > z.columnOffset+z.Columns {
@@ -816,7 +903,49 @@ func (z *ZGrid) MoveCaret(dir CaretMovement) {
 		if z.CaretPos.Column >= z.columnOffset+z.Columns {
 			z.ScrollRight(z.Columns / 2)
 		}
+	case CaretHome:
+		z.CaretPos = CharPos{Line: 0, Column: 0}
+		z.SetTopLine(0)
+	case CaretEnd:
+		newTop := z.LastLine() - z.Lines + 1
+		z.SetTopLine(newTop)
+		z.CaretPos = CharPos{Line: z.LastLine(), Column: z.LastColumn(z.LastLine())}
+	case CaretLineStart:
+		z.CaretPos = CharPos{Line: z.CaretPos.Line, Column: 0}
+		if z.columnOffset > 0 {
+			z.columnOffset = 0
+		}
+	case CaretLineEnd:
+		z.CaretPos = CharPos{Line: z.CaretPos.Line, Column: z.LastColumn(z.CaretPos.Line)}
+		if z.CaretPos.Column >= z.columnOffset+z.Columns {
+			z.ScrollRight(z.Columns / 2)
+		}
+	case CaretHalfPageDown:
+		newLine := min(z.LastLine(), z.CaretPos.Line+z.Lines/2)
+		z.CaretPos = CharPos{Line: newLine, Column: z.CaretPos.Column}
+		if newLine > z.lineOffset+z.Lines-1 {
+			z.CenterLineOnCaret()
+		}
+	case CaretHalfPageUp:
+		newLine := max(0, z.CaretPos.Line-z.Lines/2)
+		z.CaretPos = CharPos{Line: newLine, Column: z.CaretPos.Column}
+		if newLine < z.lineOffset {
+			z.CenterLineOnCaret()
+		}
+	case CaretPageDown:
+		newLine := min(z.LastLine(), z.CaretPos.Line+z.Lines)
+		z.CaretPos = CharPos{Line: newLine, Column: z.CaretPos.Column}
+		if newLine > z.lineOffset+z.Lines-1 {
+			z.CenterLineOnCaret()
+		}
+	case CaretPageUp:
+		newLine := max(0, z.CaretPos.Line-z.Lines)
+		z.CaretPos = CharPos{Line: newLine, Column: z.CaretPos.Column}
+		if newLine < z.lineOffset {
+			z.CenterLineOnCaret()
+		}
 	}
+
 }
 
 // STYLES
@@ -908,4 +1037,10 @@ func substring(s string, start int, end int) string {
 		i++
 	}
 	return s[start_str_idx:]
+}
+
+// SafePositiveValue returns a sanitized integer that is 0 or larger
+// and no larger than the given maximum value (inclusive).
+func SafePositiveValue(value int, maximum int) int {
+	return min(max(0, value), maximum)
 }
