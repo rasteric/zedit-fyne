@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -18,6 +19,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 	"github.com/chewxy/math32"
 	"github.com/muesli/gamut"
+	"golang.org/x/exp/slices"
 )
 
 type CaretMovement int
@@ -95,10 +97,14 @@ type ZGrid struct {
 	Columns            int
 	ShowLineNumbers    bool
 	ShowWhitespace     bool
+	HardLF             rune          // hard line feed character
+	SoftLF             rune          // soft line feed character (subject to word-wrapping and deletion in text)
 	ScrollFactor       float32       // speed of scrolling
 	TabWidth           int           // If set to 0 the fyne.DefaultTabWidth is used
 	MinRefreshInterval time.Duration // minimum interval in ms to refresh display
 	CharDrift          float32       // default 0.4, added to calculation per char when finding char position from x-position
+	LineWrap           bool          // automatically wrap lines (default: true)
+	SoftWrap           bool          // soft wrap lines, if not true wrapping inserst hard line feeds (default: true)
 	// text cursor
 	DrawCaret            bool
 	CaretBlinkDelay      time.Duration
@@ -130,6 +136,7 @@ type ZGrid struct {
 	shortcuts       map[string]fyne.KeyboardShortcut
 	handlers        map[string]func(z *ZGrid)
 	keyHandlers     map[fyne.KeyName]func(z *ZGrid)
+	canvas          fyne.Canvas
 	// delayed refresh
 	refresher     func()
 	lastRefreshed time.Time
@@ -138,7 +145,7 @@ type ZGrid struct {
 }
 
 // ZGrid is like TextGrid but with an internal vertical scroll bar and an optional line number display.
-func NewZGrid(columns, lines int) *ZGrid {
+func NewZGrid(columns, lines int, c fyne.Canvas) *ZGrid {
 	bgcolor := gamut.Blends(theme.ForegroundColor(), theme.PrimaryColor(), 8)[2]
 	fgcolor := theme.BackgroundColor()
 	if fyne.CurrentApp().Settings().ThemeVariant() == theme.VariantDark {
@@ -147,6 +154,11 @@ func NewZGrid(columns, lines int) *ZGrid {
 		fgcolor = gamut.Darker(fgcolor, 0.2)
 	}
 	z := ZGrid{Lines: lines, Columns: columns + 1, grid: widget.NewTextGrid()}
+	z.canvas = c
+	z.LineWrap = true
+	z.SoftWrap = true
+	z.HardLF = ' '
+	z.SoftLF = '\r'
 	z.CharDrift = 0.4
 	z.grid = widget.NewTextGrid()
 	z.initInternalGrid()
@@ -180,6 +192,7 @@ func NewZGrid(columns, lines int) *ZGrid {
 		z.scroll.Offset = pos
 		z.hasFocus = true
 		z.Refresh()
+		z.Focus()
 	}
 	z.border = container.NewBorder(nil, nil, z.lineNumberGrid, z.scroll, z.grid)
 	z.content = container.New(layout.NewStackLayout(), z.background, z.border)
@@ -230,7 +243,7 @@ func (z *ZGrid) SetTopLine(x int) {
 // CenterLineOnCaret adjusts the displayed lines such that the caret is in the center of the grid.
 func (z *ZGrid) CenterLineOnCaret() {
 	line := z.CaretPos.Line
-	z.SetTopLine(min(z.LastLine()-z.Lines, max(0, line-z.Lines/2)))
+	z.SetTopLine(min(z.LastLine()-z.Lines+1, max(0, line-z.Lines/2)))
 }
 
 // LastLine returns the last line (0-indexed).
@@ -392,6 +405,10 @@ func (z *ZGrid) FocusLost() {
 	z.Refresh()
 }
 
+func (z *ZGrid) Focus() {
+	z.canvas.Focus(z)
+}
+
 func (z *ZGrid) MouseIn(evt *desktop.MouseEvent) {}
 
 func (z *ZGrid) MouseMoved(evt *desktop.MouseEvent) {}
@@ -424,6 +441,7 @@ func (z *ZGrid) Dragged(evt *fyne.DragEvent) {
 		return
 	}
 	z.Refresh()
+	z.Focus()
 }
 
 func (z *ZGrid) Cursor() desktop.Cursor {
@@ -437,6 +455,7 @@ func (z *ZGrid) Tapped(evt *fyne.PointEvent) {
 	z.RemoveSelection()
 	pos := z.PosToCharPos(evt.Position)
 	z.SetCaret(pos)
+	z.Focus()
 }
 
 func (z *ZGrid) DragEnd() {
@@ -505,6 +524,10 @@ func (z *ZGrid) GetLineText(row int) string {
 }
 
 func (z *ZGrid) MinSize() fyne.Size {
+	if !z.ShowLineNumbers {
+		return fyne.Size{Width: float32(z.Columns) * z.charSize.Width,
+			Height: float32(z.Lines) * z.charSize.Height}
+	}
 	return fyne.Size{Width: float32(z.lineNumberLen())*z.charSize.Width + float32(z.Columns)*z.charSize.Width,
 		Height: float32(z.Lines) * z.charSize.Height}
 }
@@ -523,7 +546,7 @@ func (z *ZGrid) SetText(s string) {
 			cells[c].Rune = char
 			c++
 		}
-		cells[c].Rune = ' '
+		cells[c].Rune = z.HardLF
 		z.Rows[i] = widget.TextGridRow{Cells: cells, Style: nil}
 	}
 
@@ -533,8 +556,10 @@ func (z *ZGrid) SetText(s string) {
 
 // KEY HANDLING
 
-func (z *ZGrid) TypedRune(rune) {
+func (z *ZGrid) TypedRune(r rune) {
 	z.lastInteraction = time.Now()
+	z.Insert([]widget.TextGridCell{{Rune: r, Style: nil}}, z.CaretPos)
+	z.MoveCaret(CaretRight)
 }
 
 func (z *ZGrid) TypedKey(evt *fyne.KeyEvent) {
@@ -611,40 +636,39 @@ func (z *ZGrid) addDefaultShortcuts() {
 		})
 }
 
-// AddEmacsShortcuts adds some (very basic) Emacs shortcuts such as Ctrl-Q, Ctrl-E, and Ctrl-P and Ctrl-N.
-// This interferes with standard shortcuts such as Ctrl-Q for Quit, and so it is only suitable for people
-// used to Emacs.
+// AddEmacsShortcuts adds some (very basic) Emacs shortcuts but some with Super key as modifier instead of Ctrl
+// in order not to interfere with standard platform keyboard shortcuts.
 func (z *ZGrid) AddEmacsShortcuts() {
 	// shortcuts
-	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.KeyE, Modifier: fyne.KeyModifierControl},
+	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.KeyE, Modifier: fyne.KeyModifierAlt},
 		func(z *ZGrid) {
 			z.MoveCaret(CaretLineEnd)
 		})
-	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.KeyQ, Modifier: fyne.KeyModifierControl},
+	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.KeyQ, Modifier: fyne.KeyModifierAlt},
 		func(z *ZGrid) {
 			z.MoveCaret(CaretLineStart)
 		})
-	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.KeyN, Modifier: fyne.KeyModifierControl},
+	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.KeyN, Modifier: fyne.KeyModifierAlt},
 		func(z *ZGrid) {
 			z.MoveCaret(CaretDown)
 		})
-	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.KeyP, Modifier: fyne.KeyModifierControl},
+	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.KeyP, Modifier: fyne.KeyModifierAlt},
 		func(z *ZGrid) {
 			z.MoveCaret(CaretUp)
 		})
-	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.KeyF, Modifier: fyne.KeyModifierControl},
+	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.KeyF, Modifier: fyne.KeyModifierAlt},
 		func(z *ZGrid) {
 			z.MoveCaret(CaretRight)
 		})
-	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.KeyB, Modifier: fyne.KeyModifierControl},
+	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.KeyB, Modifier: fyne.KeyModifierAlt},
 		func(z *ZGrid) {
 			z.MoveCaret(CaretLeft)
 		})
-	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.KeyV, Modifier: fyne.KeyModifierControl},
+	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.KeyV, Modifier: fyne.KeyModifierAlt},
 		func(z *ZGrid) {
 			z.MoveCaret(CaretHalfPageDown)
 		})
-	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.KeyV, Modifier: fyne.KeyModifierAlt},
+	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.KeyV, Modifier: fyne.KeyModifierAlt | fyne.KeyModifierShift},
 		func(z *ZGrid) {
 			z.MoveCaret(CaretHalfPageUp)
 		})
@@ -768,8 +792,16 @@ func (z *ZGrid) maybeDrawCaret() bool {
 	if !z.DrawCaret {
 		return false
 	}
-	line := SafePositiveValue(z.CaretPos.Line-z.lineOffset, len(z.grid.Rows)-1)
-	col := SafePositiveValue(z.CaretPos.Column-z.columnOffset, len(z.grid.Rows[line].Cells)-1)
+	line := z.CaretPos.Line - z.lineOffset
+	if line < 0 || line > z.Lines-1 {
+		return false
+	}
+	line = SafePositiveValue(line, len(z.grid.Rows)-1)
+	col := z.CaretPos.Column - z.columnOffset
+	if col > z.Columns-1 {
+		return false
+	}
+	col = SafePositiveValue(col, len(z.grid.Rows[line].Cells)-1)
 	switch atomic.LoadUint32(&z.caretState) {
 	case 2:
 		z.grid.Rows[line].Cells[col].Style = z.invertedDefaultStyle
@@ -945,6 +977,65 @@ func (z *ZGrid) MoveCaret(dir CaretMovement) {
 			z.CenterLineOnCaret()
 		}
 	}
+}
+
+// INSERT with soft wrap
+
+// Insert inserts an array of TextGridCells at row, col, optionally soft wrapping it and using
+// hardLF and softLF as hard and soft line feed characters. The cursor position and tags
+// are updated automatically by this method.
+func (z *ZGrid) Insert(cells []widget.TextGridCell, pos CharPos) {
+	startRow := z.FindParagraphStart(pos.Line, z.HardLF)
+	endRow := z.FindParagraphEnd(pos.Line, z.HardLF)
+	rows := make([]widget.TextGridRow, (endRow-startRow)+1)
+	for i := range rows {
+		rows[i] = z.Rows[i+startRow]
+	}
+	k := pos.Line - startRow // the row into which we insert
+	line := rows[k].Cells
+	lenLine := len(line)
+	lenInsert := len(cells)
+	n := lenLine + lenInsert
+	newLine := make([]widget.TextGridCell, 0, n)
+	if pos.Column >= lenLine {
+		newLine = append(newLine, line...)
+		newLine = append(newLine, cells...)
+	} else if pos.Column == 0 {
+		newLine = append(newLine, cells...)
+		newLine = append(newLine, line...)
+	} else {
+		newLine = append(newLine, line[:pos.Column]...)
+		newLine = append(newLine, cells...)
+		newLine = append(newLine, line[pos.Column:lenLine]...)
+	}
+	rows[k] = widget.TextGridRow{Cells: newLine, Style: rows[k].Style}
+
+	var cline, ccol int
+	cline = pos.Line - startRow
+	ccol = pos.Column
+	if z.LineWrap {
+		rows, cline, ccol = WordWrapTextGridRows(rows, z.Columns, z.SoftWrap, z.HardLF, z.SoftLF, cline, ccol)
+	}
+	z.CaretPos = CharPos{Line: cline + startRow, Column: ccol}
+	// check if we need to delete rows
+	if len(rows) < endRow-startRow+1 {
+		z.Rows = slices.Delete(z.Rows, startRow+len(rows), endRow+1)
+	}
+	// check if we need to insert additional rows
+	if len(rows) > endRow-startRow+1 {
+		newRows := make([]widget.TextGridRow, len(rows)-(endRow-startRow+1))
+		z.Rows = slices.Insert(z.Rows, endRow+1, newRows...)
+	}
+	for i := range rows {
+		z.Rows[i+startRow] = rows[i]
+	}
+}
+
+// DELETE with soft wrap
+
+// Delete deletes a range of characters, optionally soft wrapping the paragraph with given hardLF
+// and softLF runes as hard and soft line feed characters.
+func (z *ZGrid) Delete(fromTo CharInterval, softWrap bool) {
 
 }
 
@@ -1043,4 +1134,146 @@ func substring(s string, start int, end int) string {
 // and no larger than the given maximum value (inclusive).
 func SafePositiveValue(value int, maximum int) int {
 	return min(max(0, value), maximum)
+}
+
+// WORD WRAPPING
+// ad hoc struct for holding text grid cells plus hosuekeeping info
+type xCell struct {
+	Cell         widget.TextGridCell
+	Row          *widget.TextGridRow
+	IsCursorCell bool
+}
+
+// WordWrapTextGridRows word wraps a number of text grid rows, making sure soft line breaks are adjusted
+// and removed accordingly. The number of rows returned may be larger than the number of rows
+// provided as an argument. The position of the original cursor row and column is returned.
+func WordWrapTextGridRows(rows []widget.TextGridRow, wrapCol int,
+	softWrap bool, hardLF, softLF rune, cursorRow, cursorCol int) ([]widget.TextGridRow, int, int) {
+	para := make([]xCell, 0)
+	// 1. push all characters into one array of extended cells
+	// but ignore line breaks
+	cursorToNext := false
+	for i := range rows {
+		for j, c := range rows[i].Cells {
+			isCursor := false
+			if (i == cursorRow && j == cursorCol) || cursorToNext {
+				isCursor = true
+				cursorToNext = false
+			}
+			if (c.Rune == hardLF && j == len(rows[i].Cells)-1) || c.Rune == softLF {
+				if i == cursorRow && j == cursorCol {
+					cursorToNext = true // delete LF but make sure cursor will be on next char
+				}
+			} else {
+				para = append(para, xCell{Cell: c,
+					Row: &rows[i], IsCursorCell: isCursor})
+			}
+		}
+	}
+	// 2. now word break the paragraph and push into a result array
+	// adding soft line breaks, and the final hard line break
+	result := make([]widget.TextGridRow, 0)
+	lastSpc := 0
+	line := make([]xCell, 0, wrapCol+1)
+	var overflow []xCell
+	col := 0
+	newCol := cursorCol
+	newRow := 0
+	var currentRow widget.TextGridRow
+	var handled bool
+	lpos := 0
+	lineIdx := 0
+	for i := range para {
+		handled = false
+		c := para[i]
+		lpos++
+		line = append(line, c)
+		if unicode.IsSpace(c.Cell.Rune) {
+			lastSpc = lpos // space position + 1 because of lpos++
+		}
+		if lpos >= wrapCol {
+			cutPos := lpos
+			if lastSpc > 0 {
+				cutPos = min(lpos, lastSpc)
+			}
+			if cutPos >= wrapCol/2 && cutPos < len(line) {
+				overflow = make([]xCell, 0, len(line)-cutPos)
+				overflow = append(overflow, line[cutPos:]...)
+				line = line[:cutPos]
+			}
+			currentRow, col = xCellsToTextGridRow(line)
+			if col >= 0 {
+				newCol = col
+			}
+			result = append(result, currentRow)
+			if cellsContainCursor(line) {
+				newRow = lineIdx
+			}
+			if overflow != nil && len(overflow) > 0 {
+				line = overflow
+				if cellsContainCursor(line) {
+					newCol = len(line) - 1
+				}
+				overflow = nil
+				lpos = len(line)
+			} else {
+				line = make([]xCell, 0, wrapCol)
+				handled = true
+				lpos = 0
+			}
+			lastSpc = 0
+			lineIdx++
+		}
+	}
+	if !handled {
+		currentRow, col = xCellsToTextGridRow(line)
+		if col >= 0 {
+			newCol = col
+		}
+		result = append(result, currentRow)
+		if cellsContainCursor(line) {
+			newRow = lineIdx
+		}
+	}
+	for i := range result {
+		if softWrap {
+			result[i].Cells = append(result[i].Cells, widget.TextGridCell{Rune: softLF, Style: nil})
+		} else {
+			result[i].Cells = append(result[i].Cells, widget.TextGridCell{Rune: hardLF, Style: nil})
+		}
+	}
+	k := len(result) - 1
+	n := len(result[k].Cells) - 1
+	result[k].Cells[n] = widget.TextGridCell{Rune: hardLF, Style: nil}
+	// The following can *only* happen if the cursor was at the very last LF,
+	// which had been deleted; see Step 1 above. So we set it to the pragraph end.
+	if cursorToNext {
+		newRow = k
+		newCol = n
+	}
+	return result, newRow, newCol
+}
+
+func xCellsToTextGridRow(cells []xCell) (widget.TextGridRow, int) {
+	if len(cells) == 0 {
+		return widget.TextGridRow{Cells: make([]widget.TextGridCell, 0), Style: nil}, -1
+	}
+	result := make([]widget.TextGridCell, len(cells))
+	col := -1
+	for i, c := range cells {
+		result[i] = c.Cell
+		if c.IsCursorCell {
+			col = i
+		}
+	}
+	return widget.TextGridRow{Cells: result, Style: cells[0].Row.Style}, col
+}
+
+func cellsContainCursor(cells []xCell) bool {
+	for _, c := range cells {
+		if c.IsCursorCell {
+			return true
+		}
+	}
+	return false
 }

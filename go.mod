@@ -7,6 +7,7 @@ require (
 	github.com/chewxy/math32 v1.10.1
 	github.com/muesli/gamut v0.3.1
 	github.com/rdleal/intervalst v1.2.2
+	golang.org/x/exp v0.0.0-20240213143201-ec583247a57a
 )
 
 require (
