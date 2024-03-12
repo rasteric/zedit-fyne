@@ -3,6 +3,7 @@ package zedit
 import (
 	"context"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"sync"
@@ -93,6 +94,7 @@ type ZGrid struct {
 	widget.BaseWidget
 	Rows               []widget.TextGridRow
 	Tags               *TagContainer
+	SelectionTag       Tag
 	Lines              int
 	Columns            int
 	ShowLineNumbers    bool
@@ -154,6 +156,7 @@ func NewZGrid(columns, lines int, c fyne.Canvas) *ZGrid {
 		fgcolor = gamut.Darker(fgcolor, 0.2)
 	}
 	z := ZGrid{Lines: lines, Columns: columns + 1, grid: widget.NewTextGrid()}
+	z.SelectionTag = NewTag("selection")
 	z.canvas = c
 	z.LineWrap = true
 	z.SoftWrap = true
@@ -196,7 +199,7 @@ func NewZGrid(columns, lines int, c fyne.Canvas) *ZGrid {
 	}
 	z.border = container.NewBorder(nil, nil, z.lineNumberGrid, z.scroll, z.grid)
 	z.content = container.New(layout.NewStackLayout(), z.background, z.border)
-	z.Tags.AddStyler(TagStyler{Tag: SimpleTag{"selection"}, StyleFunc: z.SelectionStyleFunc(), DrawFullLine: true})
+	z.Tags.AddStyler(TagStyler{Tag: z.SelectionTag, StyleFunc: z.SelectionStyleFunc(), DrawFullLine: true})
 	z.SetText(" ")
 	z.BlinkCaret(true)
 	z.addDefaultShortcuts()
@@ -430,9 +433,8 @@ func (z *ZGrid) Dragged(evt *fyne.DragEvent) {
 		return
 	}
 	z.selEnd = &pos
-	tag := SimpleTag{"selection"}
 	interval := CharInterval{Start: *z.selStart, End: *z.selEnd}.MaybeSwap()
-	z.Tags.Upsert(tag, interval)
+	z.Tags.Upsert(z.SelectionTag, interval)
 	if pos.Line <= z.lineOffset {
 		z.ScrollUp()
 		return
@@ -468,7 +470,7 @@ func (z *ZGrid) DragEnd() {
 // RemoveSelection removes the current selection, both the range returned by GetSelection
 // and its graphical display.
 func (z *ZGrid) RemoveSelection() {
-	z.Tags.Delete(SimpleTag{"selection"})
+	z.Tags.Delete(z.SelectionTag)
 	z.selStart = nil
 	z.selEnd = nil
 	z.Refresh()
@@ -624,6 +626,15 @@ func (z *ZGrid) addDefaultShortcuts() {
 	})
 	z.AddKeyHandler(fyne.KeyPageUp, func(z *ZGrid) {
 		z.MoveCaret(CaretHalfPageUp)
+	})
+	z.AddKeyHandler(fyne.KeyBackspace, func(z *ZGrid) {
+		z.Backspace()
+	})
+	z.AddKeyHandler(fyne.KeyDelete, func(z *ZGrid) {
+		z.Delete1()
+	})
+	z.AddKeyHandler(fyne.KeyReturn, func(z *ZGrid) {
+		z.Return()
 	})
 	// shortcuts
 	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.KeyPageDown, Modifier: fyne.KeyModifierControl},
@@ -987,6 +998,7 @@ func (z *ZGrid) MoveCaret(dir CaretMovement) {
 func (z *ZGrid) Insert(cells []widget.TextGridCell, pos CharPos) {
 	startRow := z.FindParagraphStart(pos.Line, z.HardLF)
 	endRow := z.FindParagraphEnd(pos.Line, z.HardLF)
+	// endRowLastColumn := len(z.Rows[endRow].Cells) - 1
 	rows := make([]widget.TextGridRow, (endRow-startRow)+1)
 	for i := range rows {
 		rows[i] = z.Rows[i+startRow]
@@ -1010,24 +1022,80 @@ func (z *ZGrid) Insert(cells []widget.TextGridCell, pos CharPos) {
 	}
 	rows[k] = widget.TextGridRow{Cells: newLine, Style: rows[k].Style}
 
+	// adjust tags
+	lastPos := CharPos{Line: len(z.Rows) - 1, Column: len(z.Rows[len(z.Rows)-1].Cells) - 1}
+	tags, ok := z.Tags.LookupRange(CharInterval{Start: pos, End: lastPos})
+	if ok {
+		for _, tag := range tags {
+			interval, ok := z.Tags.Lookup(tag)
+			if !ok {
+				log.Printf(`WARN tag "%v" has no associated interval [Insert]\n`, tag.Name())
+				continue // non-fatal error, ignore
+			}
+			if interval.Start.Line == pos.Line {
+				// the tag's interval starts on the same line as we're inserting
+				// this is the only case to consider before word wrapping
+				if pos.Column < interval.Start.Column {
+					// we insert before, so shift interval by text inserted
+					var endPos CharPos
+					if interval.End.Line == pos.Line {
+						endPos = CharPos{Line: interval.End.Line, Column: interval.End.Column + lenInsert}
+					} else {
+						endPos = interval.End
+					}
+					newInterval := CharInterval{Start: CharPos{Line: interval.Start.Line,
+						Column: interval.Start.Column + lenInsert}, End: endPos}
+					z.Tags.Upsert(tag, newInterval)
+				}
+			}
+		}
+	}
+	// end adjust tags
+
 	var cline, ccol int
 	cline = pos.Line - startRow
 	ccol = pos.Column
 	if z.LineWrap {
-		rows, cline, ccol = WordWrapTextGridRows(rows, z.Columns, z.SoftWrap, z.HardLF, z.SoftLF, cline, ccol)
+		rows, cline, ccol = z.WordWrapTextGridRows(rows, z.Columns, z.SoftWrap, z.HardLF, z.SoftLF,
+			cline, ccol, startRow, tags, pos)
 	}
 	z.CaretPos = CharPos{Line: cline + startRow, Column: ccol}
+	lineDelta := len(rows) - (endRow - startRow + 1)
 	// check if we need to delete rows
-	if len(rows) < endRow-startRow+1 {
+	if lineDelta < 0 {
 		z.Rows = slices.Delete(z.Rows, startRow+len(rows), endRow+1)
+		z.adjustTagLines(tags, lineDelta, pos)
 	}
 	// check if we need to insert additional rows
-	if len(rows) > endRow-startRow+1 {
+	if lineDelta > 0 {
 		newRows := make([]widget.TextGridRow, len(rows)-(endRow-startRow+1))
 		z.Rows = slices.Insert(z.Rows, endRow+1, newRows...)
+		z.adjustTagLines(tags, lineDelta, pos)
 	}
 	for i := range rows {
 		z.Rows[i+startRow] = rows[i]
+	}
+}
+
+// adjustTagLines adjusts the given tags based on the given lineDelta, which represents the number of lines added
+// or removed when a paragraph is reflown. When the insertPos is before the tags interval, the start and end
+// of the tag interval need to be adjusted by lineDelta lines. Otherwise, the only the end line needs to be adjusted.
+func (z *ZGrid) adjustTagLines(tags []Tag, lineDelta int, insertPos CharPos) {
+	for _, tag := range tags {
+		interval, ok := z.Tags.Lookup(tag)
+		if !ok {
+			log.Printf(`WARN tag "%v" has no associated interval [adjustTags]\n`, tag.Name())
+			continue // non-fatal error, ignore
+		}
+		if insertPos.Line == interval.End.Line {
+			continue
+		}
+		newInterval := interval
+		newInterval.End = CharPos{Line: interval.End.Line + lineDelta, Column: interval.End.Column}
+		if insertPos.Line < interval.Start.Line {
+			newInterval.Start = CharPos{Line: interval.Start.Line + lineDelta, Column: interval.Start.Column}
+		}
+		z.Tags.Upsert(tag, newInterval)
 	}
 }
 
@@ -1035,8 +1103,232 @@ func (z *ZGrid) Insert(cells []widget.TextGridCell, pos CharPos) {
 
 // Delete deletes a range of characters, optionally soft wrapping the paragraph with given hardLF
 // and softLF runes as hard and soft line feed characters.
-func (z *ZGrid) Delete(fromTo CharInterval, softWrap bool) {
+func (z *ZGrid) Delete(fromTo CharInterval) {
+	cursorRow := z.CaretPos.Line
+	cursorColumn := z.CaretPos.Column
+	pos := fromTo.Start
+	lastPos := CharPos{Line: len(z.Rows) - 1, Column: len(z.Rows[len(z.Rows)-1].Cells) - 1}
+	tags, _ := z.Tags.LookupRange(CharInterval{Start: pos, End: lastPos})
 
+	// adjust tags TODO not working at all
+	for _, tag := range tags {
+		interval, ok := z.Tags.Lookup(tag)
+		if !ok {
+			log.Printf(`WARN tag "%v" has no associated interval [adjustTags]\n`, tag.Name())
+			continue // non-fatal error, ignore
+		}
+		z.maybeAdjustTagIntervalForDelete(tag, interval, fromTo)
+	}
+
+	// delete the range from fromTo.Start.Line to fromTo.End.Line in the Rows
+	var underflow []widget.TextGridCell
+	for i := fromTo.End.Line; i >= fromTo.Start.Line; i-- {
+		if fromTo.Start.Line < i && i < fromTo.End.Line {
+			z.Rows = slices.Delete(z.Rows, i, i+1)
+			continue
+		}
+		row := z.Rows[i]
+		if i == fromTo.Start.Line && i == fromTo.End.Line {
+			row.Cells = slices.Delete(row.Cells, fromTo.Start.Column, fromTo.End.Column)
+			if cursorRow == i && cursorColumn >= fromTo.Start.Column {
+				cursorColumn = fromTo.Start.Column
+			}
+		} else if i == fromTo.Start.Line {
+			row.Cells = slices.Delete(row.Cells, fromTo.Start.Column, len(row.Cells))
+			if underflow != nil {
+				row.Cells = append(row.Cells, underflow...)
+				z.Rows[i] = row
+				cursorColumn = len(row.Cells) - len(underflow)
+				z.Rows = slices.Delete(z.Rows, i, i+1)
+				underflow = nil
+			}
+			if len(row.Cells) == 0 && i > 0 {
+				z.Rows = slices.Delete(z.Rows, i, i+1)
+				cursorColumn = 0
+				cursorRow = i
+			} else if inSelectionRange(fromTo.Start.Line, fromTo.Start.Column,
+				fromTo.End.Line, fromTo.End.Column, cursorRow, cursorColumn) {
+				cursorColumn = fromTo.Start.Column
+				cursorRow = i
+			}
+		} else if i == fromTo.End.Line {
+			if fromTo.End.Column < len(row.Cells) {
+				underflow = slices.Clone(row.Cells[fromTo.End.Column:])
+			}
+			row.Cells = slices.Delete(row.Cells, 0, fromTo.End.Column)
+		}
+		z.Rows[i] = row
+	}
+	// now we reflow with word wrap like in wrap-insert-zgrid
+	paraStart := z.FindParagraphStart(fromTo.Start.Line, z.HardLF)
+	paraEnd := z.FindParagraphEnd(fromTo.Start.Line, z.HardLF)
+	rows := make([]widget.TextGridRow, paraEnd-paraStart+1)
+	for i := range rows {
+		rows[i] = z.Rows[i+paraStart]
+	}
+	newCursorRow := cursorRow
+	newCursorCol := cursorColumn
+	lineDelta := len(rows) - (paraEnd - paraStart + 1)
+	rows, newCursorRow, newCursorCol = z.WordWrapTextGridRows(rows, z.Columns, z.SoftWrap, z.HardLF,
+		z.SoftLF, newCursorRow-paraStart, newCursorCol, paraStart, tags, pos)
+	// check if we need to delete rows
+	if len(rows) < paraEnd-paraStart+1 {
+		z.Rows = slices.Delete(z.Rows, paraStart+len(rows), paraEnd+1)
+		z.adjustTagLines(tags, lineDelta, pos)
+	}
+	// check if we need to insert additional rows
+	if len(rows) > paraEnd-paraStart+1 {
+		newRows := make([]widget.TextGridRow, len(rows)-(paraEnd-paraStart+1))
+		z.Rows = slices.Insert(z.Rows, paraEnd+1, newRows...)
+		z.adjustTagLines(tags, lineDelta, pos)
+	}
+	for i := range rows {
+		z.Rows[i+paraStart] = rows[i]
+	}
+	z.SetCaret(CharPos{Line: newCursorRow + paraStart, Column: newCursorCol})
+	z.Refresh()
+}
+
+// PrevPos returns the previous char position in the grid and true, or 0, 0 and false if at home position.
+func (z *ZGrid) PrevPos(pos CharPos) (CharPos, bool) {
+	if pos.Line <= 0 && pos.Column <= 0 {
+		return CharPos{Line: 0, Column: 0}, false
+	}
+	if pos.Column == 0 {
+		return CharPos{Line: pos.Line - 1, Column: len(z.Rows[pos.Line-1].Cells) - 1}, true
+	}
+	return CharPos{Line: pos.Line, Column: pos.Column - 1}, true
+}
+
+// maybeAdjustTagIntervalForDelete adjusts the given interval based on deleting fromTo. This has 8 cases
+// and some of them require knowing the lengths of the lines. See Delete for usage of this method.
+// No word wrapping is assumed since this is handled separately.
+// Cases to consider:
+//
+//	Case 1: A is within B.
+//	Case 2: A overlaps into B from the left.
+//	Case 3: B is within A.
+//	Case 4: A is strictly after B.
+//	Case 5: A is strictly before B and ends on the line B starts.
+//	Case 6: A is strictly before B and ends before the line B starts.
+//	Case 7: A overlaps into B from the right.
+func (z *ZGrid) maybeAdjustTagIntervalForDelete(tag Tag, interval, fromTo CharInterval) {
+	// Case 4: fromTo is strictly after interval => Do nothing.
+	if CmpPos(fromTo.Start, interval.End) > 0 {
+		return
+	}
+	lineDelta := fromTo.Start.Line - fromTo.End.Line
+	log.Println(lineDelta)
+	columnDelta := fromTo.End.Column
+	if fromTo.Start.Line == fromTo.End.Line {
+		columnDelta -= fromTo.Start.Column
+	}
+	columnDelta = -columnDelta
+	if CmpPos(fromTo.End, interval.Start) < 0 {
+		// Cases 5 and 6.
+		if fromTo.End.Line < interval.Start.Line {
+			// Case 6: We shift the interval by lineDelta, no other changes needed.
+			newInterval := CharInterval{Start: CharPos{Line: interval.Start.Line + lineDelta, Column: interval.Start.Column},
+				End: CharPos{Line: interval.End.Line + lineDelta, Column: interval.End.Column}}
+			z.Tags.Upsert(tag, newInterval)
+			return
+		}
+		// Case 5: We shift the interval by lineDelta but also have to shift the start column.
+		var newInterval CharInterval
+		if interval.Start.Line == interval.End.Line {
+			// Special case: The interval ends on the same line, so the end has to be adjusted, too.
+			newInterval = CharInterval{Start: CharPos{Line: interval.Start.Line + lineDelta, Column: interval.Start.Column + columnDelta},
+				End: CharPos{Line: interval.End.Line + lineDelta, Column: interval.End.Column + columnDelta}}
+		} else {
+			newInterval = CharInterval{Start: CharPos{Line: interval.Start.Line + lineDelta, Column: interval.Start.Column + columnDelta},
+				End: CharPos{Line: interval.End.Line + lineDelta, Column: interval.End.Column}}
+		}
+		z.Tags.Upsert(tag, newInterval)
+		return
+	}
+	if CmpPos(fromTo.Start, interval.Start) <= 0 && CmpPos(fromTo.End, interval.End) >= 0 {
+		// Case 3: We can delete the tag, because the entire interval is being deleted.
+		z.Tags.Delete(tag)
+		return
+	}
+	if CmpPos(fromTo.Start, interval.Start) >= 0 && CmpPos(fromTo.End, interval.End) <= 0 {
+		// Case 1: The deletion interval is within the interval. (Note: Exact equality already handled above.)
+		// Only the end column has to be adjusted. Whatever is deleted in the start line does not affect the interval.
+		if fromTo.End.Line != interval.End.Line {
+			columnDelta = 0
+		}
+		newInterval := CharInterval{Start: CharPos{Line: interval.Start.Line, Column: interval.Start.Column},
+			End: CharPos{Line: interval.End.Line + lineDelta, Column: interval.End.Column + columnDelta}}
+		z.Tags.Upsert(tag, newInterval)
+		return
+	}
+	if CmpPos(fromTo.Start, interval.Start) < 0 {
+		// Case 2: The new interval starts at fromTo.Start. We may need to adjust the end column and need to subtract lineDelta.
+		if fromTo.End.Line != interval.End.Line {
+			columnDelta = 0
+		}
+		newInterval := CharInterval{Start: fromTo.Start,
+			End: CharPos{Line: interval.End.Line + lineDelta, Column: interval.End.Column + columnDelta}}
+		z.Tags.Upsert(tag, newInterval)
+		return
+	}
+	if CmpPos(fromTo.Start, interval.Start) >= 0 && CmpPos(fromTo.End, interval.End) > 0 {
+		// Case 7: Adjust by lineDelta and the new column will be fromTo. Start.
+		newInterval := CharInterval{Start: interval.Start, End: fromTo.Start}
+		z.Tags.Upsert(tag, newInterval)
+		return
+	}
+	log.Printf("zedit.Editor.Delete: An interval adjustment was left unhandled, which should never occur. fromTo: %v, interval to adjust: %v\n", fromTo, interval)
+}
+
+// NextPos returns the next char position in the grid and true, or the last position and false if there is no more.
+func (z *ZGrid) NextPos(pos CharPos) (CharPos, bool) {
+	if pos.Line >= len(z.Rows)-1 && pos.Column >= len(z.Rows[pos.Line].Cells)-1 {
+		return CharPos{Line: len(z.Rows) - 1, Column: len(z.Rows[len(z.Rows)-1].Cells) - 1}, false
+	}
+	if pos.Column >= len(z.Rows[pos.Line].Cells)-1 {
+		return CharPos{Line: pos.Line + 1, Column: 0}, true
+	}
+	return CharPos{Line: pos.Line, Column: pos.Column + 1}, true
+}
+
+// Backspace deletes the character left of the caret, if there is one.
+func (z *ZGrid) Backspace() {
+	to := z.CaretPos
+	from, changed := z.PrevPos(to)
+	if !changed {
+		return
+	}
+	z.Delete(CharInterval{Start: from, End: to})
+}
+
+// Delete1 deletes the character under the caret, if there is one.
+func (z *ZGrid) Delete1() {
+	from := z.CaretPos
+	to, changed := z.NextPos(from)
+	if !changed {
+		return
+	}
+	z.Delete(CharInterval{Start: from, End: to})
+}
+
+// Return implements the return key behavior, which creates a new line and advances the caret accordingly.
+func (z *ZGrid) Return() {
+	pos := z.CaretPos
+	if pos.Column == 0 {
+		z.Rows = slices.Insert(z.Rows, pos.Line, widget.TextGridRow{
+			Cells: []widget.TextGridCell{{Rune: z.HardLF, Style: nil}},
+			Style: nil,
+		})
+		z.MoveCaret(CaretDown)
+		z.Refresh()
+		return
+	}
+	buff := z.Rows[pos.Line].Cells[pos.Column:]
+	z.Rows[pos.Line].Cells = z.Rows[pos.Line].Cells[:pos.Column]
+	z.Rows = slices.Insert(z.Rows, pos.Line+1, widget.TextGridRow{Cells: slices.Clone(buff), Style: nil})
+	z.Refresh()
+	z.MoveCaret(CaretRight)
 }
 
 // STYLES
@@ -1137,18 +1429,27 @@ func SafePositiveValue(value int, maximum int) int {
 }
 
 // WORD WRAPPING
-// ad hoc struct for holding text grid cells plus hosuekeeping info
+// Ad hoc struct for holding text grid cells plus hosuekeeping info.
 type xCell struct {
 	Cell         widget.TextGridCell
 	Row          *widget.TextGridRow
 	IsCursorCell bool
+	tags         []xTag
+}
+
+// Ad hoc struct for holding a tag and whether we record the start of the tag's interval
+// or the end. We use this to record start and end of tags directly in xCell.
+type xTag struct {
+	tag     Tag
+	isStart bool
 }
 
 // WordWrapTextGridRows word wraps a number of text grid rows, making sure soft line breaks are adjusted
 // and removed accordingly. The number of rows returned may be larger than the number of rows
 // provided as an argument. The position of the original cursor row and column is returned.
-func WordWrapTextGridRows(rows []widget.TextGridRow, wrapCol int,
-	softWrap bool, hardLF, softLF rune, cursorRow, cursorCol int) ([]widget.TextGridRow, int, int) {
+func (z *ZGrid) WordWrapTextGridRows(rows []widget.TextGridRow, wrapCol int,
+	softWrap bool, hardLF, softLF rune, cursorRow, cursorCol, startRow int,
+	tags []Tag, pos CharPos) ([]widget.TextGridRow, int, int) {
 	para := make([]xCell, 0)
 	// 1. push all characters into one array of extended cells
 	// but ignore line breaks
@@ -1165,8 +1466,29 @@ func WordWrapTextGridRows(rows []widget.TextGridRow, wrapCol int,
 					cursorToNext = true // delete LF but make sure cursor will be on next char
 				}
 			} else {
-				para = append(para, xCell{Cell: c,
-					Row: &rows[i], IsCursorCell: isCursor})
+				var tg []xTag
+				line := startRow + i
+				for _, tag := range tags {
+					interval, found := z.Tags.Lookup(tag)
+					if !found {
+						continue
+					}
+					isStart := CmpPos(interval.Start, CharPos{Line: line, Column: j}) == 0
+					isEnd := CmpPos(interval.End, CharPos{Line: line, Column: j}) == 0
+					if !isStart && !isEnd {
+						continue
+					}
+					if tg == nil {
+						tg = make([]xTag, 0)
+					}
+					if isStart {
+						tg = append(tg, xTag{tag: tag, isStart: true})
+					}
+					if isEnd {
+						tg = append(tg, xTag{tag: tag, isStart: false})
+					}
+				}
+				para = append(para, xCell{Cell: c, Row: &rows[i], IsCursorCell: isCursor, tags: tg})
 			}
 		}
 	}
@@ -1202,6 +1524,10 @@ func WordWrapTextGridRows(rows []widget.TextGridRow, wrapCol int,
 				line = line[:cutPos]
 			}
 			currentRow, col = xCellsToTextGridRow(line)
+
+			// adjust the tags if necessary
+			z.adjustTags(line, startRow, lineIdx)
+
 			if col >= 0 {
 				newCol = col
 			}
@@ -1227,6 +1553,7 @@ func WordWrapTextGridRows(rows []widget.TextGridRow, wrapCol int,
 	}
 	if !handled {
 		currentRow, col = xCellsToTextGridRow(line)
+		z.adjustTags(line, startRow, lineIdx)
 		if col >= 0 {
 			newCol = col
 		}
@@ -1254,6 +1581,31 @@ func WordWrapTextGridRows(rows []widget.TextGridRow, wrapCol int,
 	return result, newRow, newCol
 }
 
+// adjustTags adjusts the intervals of tags recorded in xCell if necessary.
+// This has bad complexity but note we only recorded start and end positions.
+func (z *ZGrid) adjustTags(line []xCell, startRow, lineIdx int) {
+outer:
+	for j, c := range line {
+		if c.tags == nil {
+			continue outer
+		}
+	inner:
+		for _, xtag := range c.tags {
+			interval, found := z.Tags.Lookup(xtag.tag)
+			if !found {
+				continue inner
+			}
+			if xtag.isStart {
+				z.Tags.Upsert(xtag.tag, CharInterval{Start: CharPos{Line: startRow + lineIdx, Column: j},
+					End: interval.End})
+			} else {
+				z.Tags.Upsert(xtag.tag, CharInterval{Start: interval.Start,
+					End: CharPos{Line: startRow + lineIdx, Column: j}})
+			}
+		}
+	}
+}
+
 func xCellsToTextGridRow(cells []xCell) (widget.TextGridRow, int) {
 	if len(cells) == 0 {
 		return widget.TextGridRow{Cells: make([]widget.TextGridCell, 0), Style: nil}, -1
@@ -1276,4 +1628,10 @@ func cellsContainCursor(cells []xCell) bool {
 		}
 	}
 	return false
+}
+
+// inSelectionRange is true if row, col is within the range startRow, startCol to endRow, endCol,
+// false otherwise.
+func inSelectionRange(startRow, startCol, endRow, endCol, row, col int) bool {
+	return (row == startRow && col >= startCol) || (row == endRow && col <= endCol) || (row > startRow && row < endRow)
 }
