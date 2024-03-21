@@ -32,6 +32,7 @@ require (
 	github.com/muesli/clusters v0.0.0-20200529215643-2700303c1762 // indirect
 	github.com/muesli/gamut v0.3.1 // indirect
 	github.com/muesli/kmeans v0.3.1 // indirect
+	github.com/phrozen/blend v0.0.0-20210220204729-f26b6cf7a28e // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/rdleal/intervalst v1.2.2 // indirect
 	github.com/srwiley/oksvg v0.0.0-20221011165216-be6e8873101c // indirect

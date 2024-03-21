@@ -10,8 +10,9 @@ func main() {
 	a := app.New()
 	w := a.NewWindow("Example")
 	// w.SetFixedSize(true)
-	ed := zedit.NewZGrid(80, 40, w.Canvas())
+	ed := zedit.NewEditor(80, 40, w.Canvas())
 	ed.ShowLineNumbers = true
+
 	ed.AddEmacsShortcuts()
 	s := ""
 	for i := 0; i < 100; i++ {

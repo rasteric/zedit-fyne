@@ -39,7 +39,7 @@ func (s *SimpleTag) Name() string {
 }
 
 type TagContainer struct {
-	names       map[string]CharInterval
+	tags        map[Tag]CharInterval
 	lookup      *interval.MultiValueSearchTree[Tag, CharPos]
 	stylers     []TagStyler
 	lineStylers []LineStyler
@@ -47,10 +47,10 @@ type TagContainer struct {
 }
 
 func NewTagContainer() *TagContainer {
-	tags := TagContainer{}
-	tags.names = make(map[string]CharInterval)
-	tags.lookup = interval.NewMultiValueSearchTreeWithOptions[Tag, CharPos](CmpPos, interval.TreeWithIntervalPoint())
-	return &tags
+	c := TagContainer{}
+	c.tags = make(map[Tag]CharInterval)
+	c.lookup = interval.NewMultiValueSearchTreeWithOptions[Tag, CharPos](CmpPos, interval.TreeWithIntervalPoint())
+	return &c
 }
 
 func (t *TagContainer) LookupRange(interval CharInterval) ([]Tag, bool) {
@@ -62,7 +62,7 @@ func (t *TagContainer) LookupRange(interval CharInterval) ([]Tag, bool) {
 func (t *TagContainer) Lookup(tag Tag) (CharInterval, bool) {
 	t.mutex.Lock()
 	defer t.mutex.Unlock()
-	interval, ok := t.names[tag.Name()]
+	interval, ok := t.tags[tag]
 	return interval, ok
 }
 
@@ -70,14 +70,14 @@ func (t *TagContainer) Add(interval CharInterval, tags ...Tag) {
 	t.mutex.Lock()
 	defer t.mutex.Unlock()
 	for _, tag := range tags {
-		t.names[tag.Name()] = interval
+		t.tags[tag] = interval
 	}
 	t.lookup.Insert(interval.Start, interval.End, tags...)
 }
 
 func (t *TagContainer) Delete(tag Tag) bool {
 	t.mutex.Lock()
-	interval, ok := t.names[tag.Name()]
+	interval, ok := t.tags[tag]
 	t.mutex.Unlock()
 	if !ok {
 		return false
@@ -88,7 +88,7 @@ func (t *TagContainer) Delete(tag Tag) bool {
 		t.lookup.Delete(interval.Start, interval.End)
 		for i := range tags {
 			if tags[i].Name() == tag.Name() {
-				delete(t.names, tag.Name())
+				delete(t.tags, tag)
 				tags[i] = tags[len(tags)-1]
 				tags = tags[:len(tags)-1]
 				break
@@ -101,7 +101,7 @@ func (t *TagContainer) Delete(tag Tag) bool {
 }
 
 func (t *TagContainer) Upsert(tag Tag, interval CharInterval) {
-	if _, ok := t.names[tag.Name()]; ok {
+	if _, ok := t.tags[tag]; ok {
 		t.Delete(tag)
 	}
 	t.Add(interval, tag)
@@ -121,7 +121,7 @@ func (t *TagContainer) RemoveStyler(tag Tag) {
 		return
 	}
 	t.stylers = slices.DeleteFunc(t.stylers, func(styler TagStyler) bool {
-		return styler.Tag.Name() == tag.Name()
+		return styler.Tag == tag
 	})
 }
 
