@@ -67,6 +67,12 @@ func (c CharInterval) Contains(pos CharPos) bool {
 	return CmpPos(pos, c.Start) >= 0 && CmpPos(pos, c.End) <= 0
 }
 
+// Overlapping returns true if the char interval is overlapping in any way with the interval passed as
+// argument, flase otherwise. c1.Overlapping(c2) and c2.Overlapping(c1) are equivalent.
+func (c1 CharInterval) Overlapping(c2 CharInterval) bool {
+	return !c2.OutsideOf(c2)
+}
+
 // MaybeSwap compares the start and the end, and if the end is before
 // the start returns the interval where the end is the start and the start is the end.
 // The function returns the unchanged interval otherwise.

@@ -1290,6 +1290,8 @@ func (z *Editor) Delete(fromTo CharInterval) {
 	for i := range rows {
 		rows[i] = z.Rows[i+paraStart]
 	}
+	lastPos = CharPos{Line: len(z.Rows) - 1, Column: len(z.Rows[len(z.Rows)-1]) - 1}
+	tags, ok = z.Tags.LookupRange(CharInterval{Start: pos, End: lastPos})
 	newCursorRow := cursorRow
 	newCursorCol := cursorColumn
 	rows, newCursorRow, newCursorCol = z.WordWrapRows(rows, z.Columns, z.SoftWrap, z.HardLF,
@@ -1364,10 +1366,10 @@ func (z *Editor) maybeAdjustTagIntervalForDelete(tag Tag, interval, fromTo CharI
 		var newInterval CharInterval
 		if interval.Start.Line == interval.End.Line {
 			// Special case: The interval ends on the same line, so the end has to be adjusted, too.
-			newInterval = CharInterval{Start: CharPos{Line: interval.Start.Line + lineDelta, Column: interval.Start.Column + columnDelta - 1},
-				End: CharPos{Line: interval.End.Line + lineDelta, Column: interval.End.Column + columnDelta - 1}}
+			newInterval = CharInterval{Start: CharPos{Line: interval.Start.Line + lineDelta, Column: interval.Start.Column + columnDelta},
+				End: CharPos{Line: interval.End.Line + lineDelta, Column: interval.End.Column + columnDelta}}
 		} else {
-			newInterval = CharInterval{Start: CharPos{Line: interval.Start.Line + lineDelta, Column: interval.Start.Column + columnDelta - 1},
+			newInterval = CharInterval{Start: CharPos{Line: interval.Start.Line + lineDelta, Column: interval.Start.Column + columnDelta},
 				End: CharPos{Line: interval.End.Line + lineDelta, Column: interval.End.Column}}
 		}
 		z.Tags.Upsert(tag, newInterval)

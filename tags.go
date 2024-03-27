@@ -1,7 +1,6 @@
 package zedit
 
 import (
-	"log"
 	"slices"
 	"sync"
 
@@ -102,7 +101,8 @@ func (t *TagContainer) Delete(tag Tag) bool {
 	if !ok {
 		return false
 	}
-	tags, ok := t.lookup.AnyIntersection(interval.Start, interval.End)
+	delete(t.tags, tag)
+	tags, ok := t.lookup.Find(interval.Start, interval.End)
 	if ok {
 		tags = slices.DeleteFunc(tags, func(tag2 Tag) bool {
 			return tag2 == tag
@@ -111,7 +111,11 @@ func (t *TagContainer) Delete(tag Tag) bool {
 			set.Delete(tag)
 			t.names[tag.Name()] = set
 		}
-		t.lookup.Upsert(interval.Start, interval.End, tags...)
+		if len(tags) > 0 {
+			t.lookup.Upsert(interval.Start, interval.End, tags...)
+		} else {
+			t.lookup.Delete(interval.Start, interval.End)
+		}
 	}
 	return ok
 }
@@ -121,15 +125,18 @@ func (t *TagContainer) Upsert(tag Tag, interval CharInterval) {
 	defer t.mutex.Unlock()
 	interval2, ok := t.tags[tag]
 	if ok {
-		tags, ok := t.lookup.AnyIntersection(interval2.Start, interval2.End)
+		tags, ok := t.lookup.Find(interval2.Start, interval2.End)
 		if ok {
 			tags = slices.DeleteFunc(tags, func(tag2 Tag) bool {
 				return tag2 == tag
 			})
-			t.lookup.Upsert(interval2.Start, interval2.End, tags...)
+			if len(tags) > 0 {
+				t.lookup.Upsert(interval2.Start, interval2.End, tags...)
+			} else {
+				t.lookup.Delete(interval2.Start, interval2.End)
+			}
 		}
 	}
-
 	t.tags[tag] = interval
 	if set, ok := t.names[tag.Name()]; ok {
 		set.Add(tag)
@@ -140,10 +147,6 @@ func (t *TagContainer) Upsert(tag Tag, interval CharInterval) {
 		t.names[tag.Name()] = set
 	}
 	t.lookup.Insert(interval.Start, interval.End, tag)
-
-	log.Printf(`UPSERT tag %v interval %v\n`, tag, interval)
-	//	t.Delete(tag)
-	//t.Add(interval, tag)
 }
 
 // TagsByName returns all tags with the given name. This is used when stylers
