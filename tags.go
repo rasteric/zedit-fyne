@@ -1,33 +1,36 @@
 package zedit
 
 import (
+	"log"
 	"slices"
 	"sync"
 
 	"fyne.io/fyne/v2/widget"
+	"github.com/lindell/go-ordered-set/orderedset"
 	"github.com/rdleal/intervalst/interval"
 )
 
+// Tags are used to store information about the editor text associated with intervals.
+// A tag's position is adjusted automatically as the editor text changes.
+// Stylers can be associated to multiple tags with the same name.
 type Tag interface {
-	Name() string
+	Name() string           // return the tag's name, which is used for stylers
+	Index() int             // return the tag's new index, indicating a serial number for tags with the same name
+	Clone(newIndex int) Tag // clone the tag, giving it a new index
 }
 
+// SimpleTag is the default implementation of a Tag.
 type SimpleTag struct {
-	name string
+	name  string
+	index int
 }
 
-type TagStyleFunc func(c widget.TextGridCell) widget.TextGridCell
-type TagLineStyleFunc func(style widget.TextGridStyle) widget.TextGridStyle
+type TagStyleFunc func(tag Tag, c widget.TextGridCell) widget.TextGridCell
 
 type TagStyler struct {
-	Tag          Tag
+	TagName      string
 	StyleFunc    TagStyleFunc
 	DrawFullLine bool
-}
-
-type LineStyler struct {
-	Tag           Tag
-	LineStyleFunc TagLineStyleFunc
 }
 
 func NewTag(name string) *SimpleTag {
@@ -38,17 +41,26 @@ func (s *SimpleTag) Name() string {
 	return s.name
 }
 
+func (s *SimpleTag) Index() int {
+	return s.index
+}
+
+func (s *SimpleTag) Clone(newIndex int) Tag {
+	return &SimpleTag{name: s.name, index: newIndex}
+}
+
 type TagContainer struct {
-	tags        map[Tag]CharInterval
-	lookup      *interval.MultiValueSearchTree[Tag, CharPos]
-	stylers     []TagStyler
-	lineStylers []LineStyler
-	mutex       sync.Mutex
+	tags    map[Tag]CharInterval
+	lookup  *interval.MultiValueSearchTree[Tag, CharPos]
+	stylers []TagStyler
+	names   map[string]*orderedset.OrderedSet[Tag]
+	mutex   sync.Mutex
 }
 
 func NewTagContainer() *TagContainer {
 	c := TagContainer{}
 	c.tags = make(map[Tag]CharInterval)
+	c.names = make(map[string]*orderedset.OrderedSet[Tag])
 	c.lookup = interval.NewMultiValueSearchTreeWithOptions[Tag, CharPos](CmpPos, interval.TreeWithIntervalPoint())
 	return &c
 }
@@ -71,43 +83,112 @@ func (t *TagContainer) Add(interval CharInterval, tags ...Tag) {
 	defer t.mutex.Unlock()
 	for _, tag := range tags {
 		t.tags[tag] = interval
+		if set, ok := t.names[tag.Name()]; ok {
+			set.Add(tag)
+			t.names[tag.Name()] = set
+		} else {
+			set := orderedset.New[Tag]()
+			set.Add(tag)
+			t.names[tag.Name()] = set
+		}
 	}
 	t.lookup.Insert(interval.Start, interval.End, tags...)
 }
 
 func (t *TagContainer) Delete(tag Tag) bool {
 	t.mutex.Lock()
+	defer t.mutex.Unlock()
 	interval, ok := t.tags[tag]
-	t.mutex.Unlock()
 	if !ok {
 		return false
 	}
-	tags, ok := t.LookupRange(interval)
+	tags, ok := t.lookup.AnyIntersection(interval.Start, interval.End)
 	if ok {
-		t.mutex.Lock()
-		t.lookup.Delete(interval.Start, interval.End)
-		for i := range tags {
-			if tags[i].Name() == tag.Name() {
-				delete(t.tags, tag)
-				tags[i] = tags[len(tags)-1]
-				tags = tags[:len(tags)-1]
-				break
-			}
+		tags = slices.DeleteFunc(tags, func(tag2 Tag) bool {
+			return tag2 == tag
+		})
+		if set, ok := t.names[tag.Name()]; ok {
+			set.Delete(tag)
+			t.names[tag.Name()] = set
 		}
-		t.lookup.Insert(interval.Start, interval.End, tags...)
-		t.mutex.Unlock()
+		t.lookup.Upsert(interval.Start, interval.End, tags...)
 	}
 	return ok
 }
 
 func (t *TagContainer) Upsert(tag Tag, interval CharInterval) {
-	if _, ok := t.tags[tag]; ok {
-		t.Delete(tag)
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
+	interval2, ok := t.tags[tag]
+	if ok {
+		tags, ok := t.lookup.AnyIntersection(interval2.Start, interval2.End)
+		if ok {
+			tags = slices.DeleteFunc(tags, func(tag2 Tag) bool {
+				return tag2 == tag
+			})
+			t.lookup.Upsert(interval2.Start, interval2.End, tags...)
+		}
 	}
-	t.Add(interval, tag)
+
+	t.tags[tag] = interval
+	if set, ok := t.names[tag.Name()]; ok {
+		set.Add(tag)
+		t.names[tag.Name()] = set
+	} else {
+		set := orderedset.New[Tag]()
+		set.Add(tag)
+		t.names[tag.Name()] = set
+	}
+	t.lookup.Insert(interval.Start, interval.End, tag)
+
+	log.Printf(`UPSERT tag %v interval %v\n`, tag, interval)
+	//	t.Delete(tag)
+	//t.Add(interval, tag)
+}
+
+// TagsByName returns all tags with the given name. This is used when stylers
+// are applied because these work on a by-name basis.
+func (t *TagContainer) TagsByName(name string) (*orderedset.OrderedSet[Tag], bool) {
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
+	tags, ok := t.names[name]
+	return tags, ok
+}
+
+// CloneTag clones the given tag with a new index, and registers the tag in the container but without an
+// associated interval. If there is no tag in the container, it registers the tag and returns it without cloning it.
+func (t *TagContainer) CloneTag(tag Tag) Tag {
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
+	tags, ok := t.names[tag.Name()]
+	if ok && tags != nil {
+		maxIdx := 0
+		loop := tags.Iter()
+		for {
+			t, ok := loop.Next()
+			if !ok {
+				break
+			}
+			if t.Index() > maxIdx {
+				maxIdx = t.Index()
+			}
+		}
+		tag = tag.Clone(maxIdx + 1)
+	}
+	if set, ok := t.names[tag.Name()]; ok {
+		set.Add(tag)
+		t.names[tag.Name()] = set
+	} else {
+		set := orderedset.New[Tag]()
+		set.Add(tag)
+		t.names[tag.Name()] = set
+	}
+	return tag
 }
 
 func (t *TagContainer) AddStyler(styler TagStyler) {
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
 	if t.stylers == nil {
 		t.stylers = make([]TagStyler, 1)
 		t.stylers[0] = styler
@@ -117,30 +198,20 @@ func (t *TagContainer) AddStyler(styler TagStyler) {
 }
 
 func (t *TagContainer) RemoveStyler(tag Tag) {
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
 	if t.stylers == nil {
 		return
 	}
 	t.stylers = slices.DeleteFunc(t.stylers, func(styler TagStyler) bool {
-		return styler.Tag == tag
+		return styler.TagName == tag.Name()
 	})
 }
 
-func (t *TagContainer) AddLineStyler(styler LineStyler) {
-	if t.lineStylers == nil {
-		t.lineStylers = make([]LineStyler, 1)
-		t.lineStylers[0] = styler
-		return
-	}
-	t.lineStylers = append(t.lineStylers, styler)
-}
-
-func (t *TagContainer) RemoveLineStyler(tag Tag) {
-	if t.lineStylers == nil {
-		return
-	}
-	t.lineStylers = slices.DeleteFunc(t.lineStylers, func(styler LineStyler) bool {
-		return styler.Tag.Name() == tag.Name()
-	})
+func (t *TagContainer) Stylers() []TagStyler {
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
+	return t.stylers
 }
 
 type CellBuffer struct {

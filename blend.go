@@ -3,6 +3,7 @@ package zedit
 import (
 	"image/color"
 
+	"github.com/lucasb-eyer/go-colorful"
 	"github.com/phrozen/blend"
 )
 
@@ -102,4 +103,11 @@ func BlendColors(blending BlendMode, switched bool, c1, c2 color.Color) color.Co
 		c = blend.Color(c2, c1)
 	}
 	return c
+}
+
+func GradientColor(c1, c2 color.Color, t float64) color.Color {
+	c3, _ := colorful.MakeColor(c1)
+	c4, _ := colorful.MakeColor(c2)
+	col := c3.BlendHcl(c4, t)
+	return col
 }

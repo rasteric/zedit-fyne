@@ -19,6 +19,7 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	"github.com/chewxy/math32"
+	"github.com/lucasb-eyer/go-colorful"
 	"golang.org/x/exp/slices"
 )
 
@@ -91,10 +92,10 @@ func (r *FixedSpacerRenderer) Refresh() {}
 
 type Editor struct {
 	widget.BaseWidget
-	Rows               []widget.TextGridRow
+	Rows               [][]rune
 	Tags               *TagContainer
 	SelectionTag       Tag
-	MarkTag            Tag
+	MarkTags           []Tag
 	Lines              int
 	Columns            int
 	ShowLineNumbers    bool
@@ -112,37 +113,38 @@ type Editor struct {
 	LineWrap           bool          // automatically wrap lines (default: true)
 	SoftWrap           bool          // soft wrap lines, if not true wrapping inserst hard line feeds (default: true)
 	// text cursor
-	DrawCaret            bool
-	CaretBlinkDelay      time.Duration
-	CaretOnDuration      time.Duration
-	CaretOffDuration     time.Duration
-	CaretPos             CharPos
-	caretState           uint32
-	hasCaretBlinking     uint32
-	invertedDefaultStyle *widget.CustomTextGridStyle
-	lastInteraction      time.Time
-	caretBlinkCancel     func()
+	DrawCaret        bool
+	CaretBlinkDelay  time.Duration
+	CaretOnDuration  time.Duration
+	CaretOffDuration time.Duration
+	CaretPos         CharPos
+	caretState       uint32
+	hasCaretBlinking uint32
+	caretBlinkCancel func()
+
 	// internal fields
-	grid            *widget.TextGrid
-	scroll          *container.Scroll
-	lineOffset      int
-	columnOffset    int
-	charSize        fyne.Size
-	border          *fyne.Container
-	defaultStyle    *widget.CustomTextGridStyle
-	lineNumberStyle *widget.CustomTextGridStyle
-	lineNumberGrid  *widget.TextGrid
-	vSpacer         *FixedSpacer
-	maxLineLen      int
-	hasFocus        bool
-	background      *canvas.Rectangle
-	content         *fyne.Container
-	selStart        *CharPos
-	selEnd          *CharPos
-	shortcuts       map[string]fyne.KeyboardShortcut
-	handlers        map[string]func(z *Editor)
-	keyHandlers     map[fyne.KeyName]func(z *Editor)
-	canvas          fyne.Canvas
+	grid                 *widget.TextGrid
+	scroll               *container.Scroll
+	lineOffset           int
+	columnOffset         int
+	charSize             fyne.Size
+	border               *fyne.Container
+	lastInteraction      time.Time
+	defaultStyle         EditorStyle
+	invertedDefaultStyle EditorStyle
+	lineNumberStyle      EditorStyle
+	lineNumberGrid       *widget.TextGrid
+	vSpacer              *FixedSpacer
+	maxLineLen           int
+	hasFocus             bool
+	background           *canvas.Rectangle
+	content              *fyne.Container
+	selStart             *CharPos
+	selEnd               *CharPos
+	shortcuts            map[string]fyne.KeyboardShortcut
+	handlers             map[string]func(z *Editor)
+	keyHandlers          map[fyne.KeyName]func(z *Editor)
+	canvas               fyne.Canvas
 	// delayed refresh
 	refresher     func()
 	lastRefreshed time.Time
@@ -159,7 +161,6 @@ func NewEditor(columns, lines int, c fyne.Canvas) *Editor {
 	z.BlendFG = BlendOverlay
 	z.BlendBG = BlendOverlay
 	z.SelectionTag = NewTag("selection")
-	z.MarkTag = NewTag("mark")
 	z.canvas = c
 	z.LineWrap = true
 	z.SoftWrap = true
@@ -178,12 +179,12 @@ func NewEditor(columns, lines int, c fyne.Canvas) *Editor {
 	z.DrawCaret = true
 	z.lastInteraction = time.Now()
 	z.caretState = 1
-	_, z.caretBlinkCancel = context.WithCancel(context.Background())
-	z.invertedDefaultStyle = &widget.CustomTextGridStyle{FGColor: theme.InputBackgroundColor(), BGColor: theme.ForegroundColor()}
 	z.Tags = NewTagContainer()
 	z.ScrollFactor = 2.0
-	z.defaultStyle = &widget.CustomTextGridStyle{FGColor: theme.ForegroundColor(), BGColor: theme.InputBackgroundColor()}
-	z.lineNumberStyle = &widget.CustomTextGridStyle{FGColor: fgcolor, BGColor: bgcolor}
+	_, z.caretBlinkCancel = context.WithCancel(context.Background())
+	z.invertedDefaultStyle = &CustomEditorStyle{FGColor: theme.InputBackgroundColor(), BGColor: theme.ForegroundColor()}
+	z.defaultStyle = &CustomEditorStyle{FGColor: theme.ForegroundColor(), BGColor: theme.InputBackgroundColor()}
+	z.lineNumberStyle = &CustomEditorStyle{FGColor: fgcolor, BGColor: bgcolor}
 	z.background = canvas.NewRectangle(theme.InputBackgroundColor()) //theme.InputBackgroundColor())
 	z.background.StrokeColor = theme.FocusColor()
 	z.background.StrokeWidth = 4
@@ -203,20 +204,35 @@ func NewEditor(columns, lines int, c fyne.Canvas) *Editor {
 	z.border = container.NewBorder(nil, nil, z.lineNumberGrid, z.scroll, z.grid)
 	z.content = container.New(layout.NewStackLayout(), z.background, z.border)
 	// selection styler
-	z.Tags.AddStyler(TagStyler{Tag: z.SelectionTag, StyleFunc: z.SelectionStyleFunc(), DrawFullLine: true})
+	z.Tags.AddStyler(TagStyler{TagName: z.SelectionTag.Name(), StyleFunc: z.SelectionStyleFunc(), DrawFullLine: true})
 	// mark color and style
-	markColor := theme.PrimaryColorNamed(theme.ColorYellow)
-	if fyne.CurrentApp().Settings().ThemeVariant() == theme.VariantDark {
-		markColor = theme.PrimaryColorNamed(theme.ColorBrown)
+	z.MarkTags = make([]Tag, 10)
+	markTag := NewTag("mark")
+	for i := range z.MarkTags {
+		z.MarkTags[i] = markTag.Clone(i)
 	}
-	markStyler := TagStyleFunc(func(c widget.TextGridCell) widget.TextGridCell {
-		selStyle := &widget.CustomTextGridStyle{FGColor: theme.ForegroundColor(), BGColor: markColor}
+	var markColors []colorful.Color
+	// if fyne.CurrentApp().Settings().ThemeVariant() == theme.VariantDark {
+	//	markColors = colorful.FastWarmPalette(10)
+	// } else {
+	isMarked := func(l, a, b float64) bool {
+		h, c, L := colorful.LabToHcl(l, a, b)
+		if fyne.CurrentApp().Settings().ThemeVariant() == theme.VariantDark {
+			return h > 0.5 && c > 0.7 && L < 0.5
+		}
+		return h > 0.5 && c > 0.7 && L > 0.7
+	}
+	// Since the above function is pretty restrictive, we set ManySamples to true.
+	markColors, _ = colorful.SoftPaletteEx(10, colorful.SoftPaletteSettings{CheckColor: isMarked, Iterations: 50, ManySamples: true})
+
+	markStyler := TagStyleFunc(func(tag Tag, c widget.TextGridCell) widget.TextGridCell {
+		selStyle := &widget.CustomTextGridStyle{FGColor: theme.ForegroundColor(), BGColor: markColors[tag.Index()%10]}
 		return widget.TextGridCell{
 			Rune:  c.Rune,
 			Style: selStyle,
 		}
 	})
-	z.Tags.AddStyler(TagStyler{Tag: z.MarkTag, StyleFunc: markStyler, DrawFullLine: true})
+	z.Tags.AddStyler(TagStyler{TagName: markTag.Name(), StyleFunc: markStyler, DrawFullLine: true})
 	z.SetText(" ")
 	z.BlinkCaret(true)
 	z.addDefaultShortcuts()
@@ -231,17 +247,18 @@ func (z *Editor) initInternalGrid() {
 		z.grid.Rows[i].Cells = make([]widget.TextGridCell, z.Columns)
 		for j := range z.grid.Rows[i].Cells {
 			z.grid.Rows[i].Cells[j].Rune = ' '
+			z.grid.Rows[i].Cells[j].Style = nil
 		}
 	}
 }
 
-func (z *Editor) SetLineNumberStyle(style *widget.CustomTextGridStyle) {
+func (z *Editor) SetLineNumberStyle(style EditorStyle) {
 	z.lineNumberStyle = style
 }
 
 func (z *Editor) SelectionStyleFunc() TagStyleFunc {
-	return TagStyleFunc(func(c widget.TextGridCell) widget.TextGridCell {
-		fg := theme.ForegroundColor()
+	return TagStyleFunc(func(tag Tag, c widget.TextGridCell) widget.TextGridCell {
+		fg := theme.TextColor()
 		bg := theme.SelectionColor()
 		if c.Style != nil {
 			if c.Style.TextColor() != nil {
@@ -283,15 +300,7 @@ func (z *Editor) LastLine() int {
 
 // LastColumn returns the last column of the given line (both 0-indexed).
 func (z *Editor) LastColumn(n int) int {
-	return len(z.Rows[n].Cells) - 1
-}
-
-// Row returns the row at line i. The row returned is not a copy but the original.
-func (z *Editor) Row(i int) widget.TextGridRow {
-	if i < 0 || i > z.LastLine() {
-		return widget.TextGridRow{}
-	}
-	return z.Rows[i]
+	return len(z.Rows[n]) - 1
 }
 
 // RowText returns the text of the row at i, the empty string if i is out of bounds.
@@ -299,22 +308,18 @@ func (z *Editor) RowText(i int) string {
 	if i < 0 || i > z.LastLine() {
 		return ""
 	}
-	var sb strings.Builder
-	for _, c := range z.Rows[i].Cells {
-		sb.WriteRune(c.Rune)
-	}
-	return sb.String()
+	return string(z.Rows[i])
 }
 
-// SetCell sets the zgrid cell at the given line and column.
-func (z *Editor) SetCell(pos CharPos, cell widget.TextGridCell) {
-	z.Rows[pos.Line].Cells[pos.Column] = cell
+// SetRune sets the rune at the given line and column.
+func (z *Editor) SetRune(pos CharPos, r rune) {
+	z.Rows[pos.Line][pos.Column] = r
 }
 
-// SetRow sets the zgrid row. If row is beyond the current size, empty rows are added accordingly.
-func (z *Editor) SetRow(row int, content widget.TextGridRow) {
+// SetRow sets the row. If row is beyond the current size, empty rows are added accordingly.
+func (z *Editor) SetRow(row int, content []rune) {
 	if row > z.LastLine() {
-		rows := make([]widget.TextGridRow, row-len(z.Rows)+1)
+		rows := makeEmptyRows(row - len(z.Rows) + 1)
 		z.Rows = append(z.Rows, rows...)
 	}
 	z.Rows[row] = content
@@ -327,50 +332,22 @@ func (grid *Editor) FindParagraphStart(row int, lf rune) int {
 	if row <= 0 {
 		return 0
 	}
-	k := len(grid.Rows[row-1].Cells)
+	k := len(grid.Rows[row-1])
 	if k == 0 {
 		return row
 	}
-	if grid.Rows[row-1].Cells[k-1].Rune == lf {
+	if grid.Rows[row-1][k-1] == lf {
 		return row
 	}
 	return grid.FindParagraphStart(row-1, lf)
-}
-
-// SetRune sets the rune at a row, column. The indices must be valid.
-func (grid *Editor) SetRune(pos CharPos, r rune) {
-	grid.Rows[pos.Line].Cells[pos.Column].Rune = r
-}
-
-// SetStyle sets the style of the cell at row, column. The indices must be valid.
-func (grid *Editor) SetStyle(pos CharPos, style widget.TextGridStyle) {
-	grid.Rows[pos.Line].Cells[pos.Column].Style = style
-}
-
-// SetStyleRange sets the style to each cell in the given range.
-func (grid *Editor) SetStyleRange(interval CharInterval, style widget.TextGridStyle) {
-	for i := interval.Start.Line; i <= interval.End.Line; i++ {
-		var s, e int
-		if i == interval.Start.Line {
-			s = interval.Start.Column
-		}
-		if i == interval.End.Line {
-			e = interval.End.Column
-		} else {
-			e = len(grid.Rows[i].Cells) - 1
-		}
-		for j := s; j <= e; j++ {
-			grid.Rows[i].Cells[j].Style = style
-		}
-	}
 }
 
 // Text returns the Editor's text as string.
 func (grid *Editor) Text() string {
 	var sb strings.Builder
 	for i := range grid.Rows {
-		for j := range grid.Rows[i].Cells {
-			sb.WriteRune(grid.Rows[i].Cells[j].Rune)
+		for j := range grid.Rows[i] {
+			sb.WriteRune(grid.Rows[i][j])
 		}
 		if i < len(grid.Rows) {
 			sb.WriteRune('\n')
@@ -379,38 +356,25 @@ func (grid *Editor) Text() string {
 	return sb.String()
 }
 
-// SetRowStyle sets the style of the row. The given row must be valid.
-func (grid *Editor) SetRowStyle(row int, style widget.TextGridStyle) {
-	grid.Rows[row].Style = style
-}
-
-// SetMark sets the mark region. If the cursor is in a mark region, then the mark region is removed.
-// If there is no selection, then the mark is set at the current cursor position. If the mark region is set, the selection is removed.
-func (z *Editor) SetMark() {
-
-	if z.Tags.Delete(z.MarkTag) {
-		z.Refresh()
-		return
-	}
-
+// SetMark marks a region.
+func (z *Editor) SetMark(n int) {
 	sel, hasSelection := z.Tags.Lookup(z.SelectionTag)
 	if !hasSelection {
 		sel = CharInterval{Start: z.CaretPos, End: z.CaretPos}
 	}
-	z.Tags.Add(sel, z.MarkTag)
+	z.Tags.Add(sel, z.MarkTags[n])
 	z.RemoveSelection()
 	z.Refresh()
 }
 
 // Cut removes the selection text and corresponding tags.
 func (z *Editor) Cut() {
-	log.Println("CUT")
 	sel, ok := z.Tags.Lookup(z.SelectionTag)
 	if !ok {
 		return
 	}
-	log.Println("DELETING")
 	z.Delete(sel)
+	z.RemoveSelection()
 }
 
 // FindParagraphEnd finds the end row of the paragraph in which row is located.
@@ -420,11 +384,11 @@ func (grid *Editor) FindParagraphEnd(row int, lf rune) int {
 	if row >= len(grid.Rows)-1 {
 		return row
 	}
-	k := len(grid.Rows[row].Cells)
+	k := len(grid.Rows[row])
 	if k == 0 {
 		return row
 	}
-	if grid.Rows[row].Cells[k-1].Rune == lf {
+	if grid.Rows[row][k-1] == lf {
 		return row
 	}
 	return grid.FindParagraphEnd(row+1, lf)
@@ -516,12 +480,66 @@ func (z *Editor) Tapped(evt *fyne.PointEvent) {
 	z.RemoveSelection()
 }
 
+func (z *Editor) DoubleTapped(evt *fyne.PointEvent) {
+	pos := z.PosToCharPos(evt.Position)
+	z.SetCaret(pos)
+	z.Focus()
+	z.SelectWord(pos)
+}
+
 func (z *Editor) DragEnd() {
 	z.selStart = nil
 	z.selEnd = nil
 }
 
 // SELECTION HANDLING
+
+// CurrentSelection returns the CharInterval if there is a non-empty selection marked,
+// an empty CharInterval and false otherwise.
+func (z *Editor) CurrentSelection() (CharInterval, bool) {
+	sel, hasSelection := z.Tags.Lookup(z.SelectionTag)
+	if !hasSelection {
+		return CharInterval{}, false
+	}
+	return sel, true
+}
+
+// SelectWord selects the word under pos if there is one, removes the selection in any case.
+func (z *Editor) SelectWord(pos CharPos) {
+	z.RemoveSelection()
+	if pos.Line >= len(z.Rows) {
+		return
+	}
+	if pos.Column >= len(z.Rows[pos.Line]) {
+		return
+	}
+	var wStart, wEnd int
+	j := pos.Column
+	for i := pos.Column; i >= 0; i-- {
+		c := z.Rows[pos.Line][i]
+		if !(unicode.IsLetter(c) || unicode.IsNumber(c)) {
+			wStart = j
+			break
+		}
+		j = i
+	}
+	j = pos.Column
+	for i := pos.Column; i < len(z.Rows[pos.Line]); i++ {
+		c := z.Rows[pos.Line][i]
+		if !(unicode.IsLetter(c) || unicode.IsNumber(c)) {
+			wEnd = j
+			break
+		}
+		j = i
+	}
+	if wEnd == 0 {
+		return
+	}
+	z.selStart = &CharPos{Line: pos.Line, Column: wStart}
+	z.selEnd = &CharPos{Line: pos.Line, Column: wEnd}
+	z.Tags.Upsert(z.SelectionTag, CharInterval{Start: *z.selStart, End: *z.selEnd})
+	z.Refresh()
+}
 
 // RemoveSelection removes the current selection, both the range returned by GetSelection
 // and its graphical display.
@@ -574,11 +592,7 @@ func (z *Editor) GetLineText(row int) string {
 	if row < 0 || row > z.LastLine() {
 		return ""
 	}
-	var s strings.Builder
-	for i := 0; i < len(z.Rows[row].Cells); i++ {
-		s.WriteRune(z.Rows[row].Cells[i].Rune)
-	}
-	return s.String()
+	return string(z.Rows[row])
 }
 
 func (z *Editor) MinSize() fyne.Size {
@@ -593,19 +607,14 @@ func (z *Editor) MinSize() fyne.Size {
 func (z *Editor) SetText(s string) {
 	lines := strings.Split(s, "\n")
 	// populate the text grid
-	z.Rows = make([]widget.TextGridRow, len(lines))
+	z.Rows = make([][]rune, len(lines))
 	for i, line := range lines {
 		if len(line) > z.maxLineLen {
 			z.maxLineLen = len(line)
 		}
-		cells := make([]widget.TextGridCell, len(line)+1)
-		c := 0
-		for _, char := range line {
-			cells[c].Rune = char
-			c++
-		}
-		cells[c].Rune = z.HardLF
-		z.Rows[i] = widget.TextGridRow{Cells: cells, Style: nil}
+		r := []rune(line)
+		r = append(r, z.HardLF)
+		z.Rows[i] = r
 	}
 
 	z.vSpacer.SetHeight(float32(len(z.Rows)) * z.charSize.Height)
@@ -616,7 +625,7 @@ func (z *Editor) SetText(s string) {
 
 func (z *Editor) TypedRune(r rune) {
 	z.lastInteraction = time.Now()
-	z.Insert([]widget.TextGridCell{{Rune: r, Style: nil}}, z.CaretPos)
+	z.Insert([]rune{r}, z.CaretPos)
 	z.MoveCaret(CaretRight)
 }
 
@@ -701,13 +710,49 @@ func (z *Editor) addDefaultShortcuts() {
 		func(z *Editor) {
 			z.MoveCaret(CaretPageUp)
 		})
-	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.KeyM, Modifier: fyne.KeyModifierControl},
-		func(z *Editor) {
-			z.SetMark()
-		})
 	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.KeyX, Modifier: fyne.KeyModifierAlt},
 		func(z *Editor) {
 			z.Cut()
+		})
+	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.Key1, Modifier: fyne.KeyModifierAlt},
+		func(z *Editor) {
+			z.SetMark(1)
+		})
+	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.Key2, Modifier: fyne.KeyModifierAlt},
+		func(z *Editor) {
+			z.SetMark(2)
+		})
+	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.Key3, Modifier: fyne.KeyModifierAlt},
+		func(z *Editor) {
+			z.SetMark(3)
+		})
+	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.Key4, Modifier: fyne.KeyModifierAlt},
+		func(z *Editor) {
+			z.SetMark(4)
+		})
+	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.Key5, Modifier: fyne.KeyModifierAlt},
+		func(z *Editor) {
+			z.SetMark(5)
+		})
+	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.Key6, Modifier: fyne.KeyModifierAlt},
+		func(z *Editor) {
+			z.SetMark(6)
+		})
+	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.Key7, Modifier: fyne.KeyModifierAlt},
+		func(z *Editor) {
+			z.SetMark(7)
+		})
+	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.Key8, Modifier: fyne.KeyModifierAlt},
+		func(z *Editor) {
+			z.SetMark(8)
+		})
+	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.Key9, Modifier: fyne.KeyModifierAlt},
+		func(z *Editor) {
+			z.SetMark(9)
+		})
+	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.Key0, Modifier: fyne.KeyModifierAlt},
+		func(z *Editor) {
+			z.SetMark(0)
 		})
 }
 
@@ -800,12 +845,12 @@ outer:
 		}
 	inner:
 		for j := range z.Columns {
-			if j+z.columnOffset >= len(z.Rows[i+z.lineOffset].Cells) {
+			if j+z.columnOffset >= len(z.Rows[i+z.lineOffset]) {
 				z.grid.Rows[i].Cells[j].Rune = ' '
 				z.grid.Rows[i].Cells[j].Style = nil
 				continue inner
 			}
-			z.grid.Rows[i].Cells[j].Rune = z.Rows[i+z.lineOffset].Cells[j+z.columnOffset].Rune
+			z.grid.Rows[i].Cells[j].Rune = z.Rows[i+z.lineOffset][j+z.columnOffset]
 			z.grid.Rows[i].Cells[j].Style = nil
 		}
 	}
@@ -828,24 +873,26 @@ outer:
 			}
 		}
 	}
-	if z.Tags.lineStylers != nil {
-		for i := len(z.Tags.stylers) - 1; i >= 0; i-- {
-			styler := z.Tags.lineStylers[i]
-			interval, ok := z.Tags.Lookup(styler.Tag)
+
+	stylers := z.Tags.Stylers()
+	if stylers != nil {
+		for i := len(stylers) - 1; i >= 0; i-- {
+			tags, ok := z.Tags.TagsByName(stylers[i].TagName)
 			if !ok {
 				continue
 			}
-			z.maybeStyleLineRange(interval, styler.LineStyleFunc)
-		}
-	}
-	if z.Tags.stylers != nil {
-		for i := len(z.Tags.stylers) - 1; i >= 0; i-- {
-			styler := z.Tags.stylers[i]
-			interval, ok := z.Tags.Lookup(styler.Tag)
-			if !ok {
-				continue
+			loop := tags.Iter()
+			for {
+				tag, ok := loop.Next()
+				if !ok {
+					break
+				}
+				interval, ok := z.Tags.Lookup(tag)
+				if !ok {
+					continue
+				}
+				z.maybeStyleRange(tag, interval, stylers[i].StyleFunc, stylers[i].DrawFullLine)
 			}
-			z.maybeStyleRange(interval, styler.StyleFunc, styler.DrawFullLine)
 		}
 	}
 	z.lineNumberGrid.Refresh()
@@ -855,7 +902,7 @@ outer:
 // curreentViewport is the char interval that is currently displayed
 func (z *Editor) currentViewport() CharInterval {
 	endLine := min(len(z.Rows)-1, z.lineOffset+z.Lines-1)
-	endColumn := len(z.Rows[endLine].Cells) - 1
+	endColumn := len(z.Rows[endLine]) - 1
 	return CharInterval{Start: CharPos{Line: z.lineOffset, Column: 0},
 		End: CharPos{Line: endLine, Column: endColumn}}
 }
@@ -880,10 +927,8 @@ func (z *Editor) maybeDrawCaret() bool {
 	switch atomic.LoadUint32(&z.caretState) {
 	case 2:
 		z.grid.Rows[line].Cells[col].Style = z.invertedDefaultStyle
-	case 1:
-		z.grid.Rows[line].Cells[col].Style = z.defaultStyle
 	default:
-		z.grid.Rows[line].Cells[col].Style = z.Rows[z.CaretPos.Line].Cells[col].Style
+		z.grid.Rows[line].Cells[col].Style = z.defaultStyle
 	}
 	z.grid.Refresh()
 	return true
@@ -989,7 +1034,7 @@ func (z *Editor) MoveCaret(dir CaretMovement) {
 				return
 			}
 			z.MoveCaret(CaretUp)
-			z.CaretPos = CharPos{Line: z.CaretPos.Line, Column: len(z.Rows[z.CaretPos.Line].Cells) - 1}
+			z.CaretPos = CharPos{Line: z.CaretPos.Line, Column: len(z.Rows[z.CaretPos.Line]) - 1}
 			if z.CaretPos.Column > z.columnOffset+z.Columns {
 				z.columnOffset = z.CaretPos.Column - z.Columns/2
 			}
@@ -1000,7 +1045,7 @@ func (z *Editor) MoveCaret(dir CaretMovement) {
 			z.ScrollLeft(z.Columns / 2)
 		}
 	case CaretRight:
-		if z.CaretPos.Column >= len(z.Rows[z.CaretPos.Line].Cells)-1 {
+		if z.CaretPos.Column >= len(z.Rows[z.CaretPos.Line])-1 {
 			z.CaretPos = CharPos{Line: z.CaretPos.Line, Column: 0}
 			z.columnOffset = 0
 			z.MoveCaret(CaretDown)
@@ -1059,38 +1104,41 @@ func (z *Editor) MoveCaret(dir CaretMovement) {
 // Insert inserts an array of TextGridCells at row, col, optionally soft wrapping it and using
 // hardLF and softLF as hard and soft line feed characters. The cursor position and tags
 // are updated automatically by this method.
-func (z *Editor) Insert(cells []widget.TextGridCell, pos CharPos) {
+func (z *Editor) Insert(r []rune, pos CharPos) {
 	startRow := z.FindParagraphStart(pos.Line, z.HardLF)
 	endRow := z.FindParagraphEnd(pos.Line, z.HardLF)
 	// endRowLastColumn := len(z.Rows[endRow].Cells) - 1
-	rows := make([]widget.TextGridRow, (endRow-startRow)+1)
+	rows := make([][]rune, (endRow-startRow)+1)
 	for i := range rows {
 		rows[i] = z.Rows[i+startRow]
 	}
 	k := pos.Line - startRow // the row into which we insert
-	line := rows[k].Cells
+	line := rows[k]
 	lenLine := len(line)
-	lenInsert := len(cells)
+	lenInsert := len(r)
 	n := lenLine + lenInsert
-	newLine := make([]widget.TextGridCell, 0, n)
+	newLine := make([]rune, 0, n)
 	if pos.Column >= lenLine {
 		newLine = append(newLine, line...)
-		newLine = append(newLine, cells...)
+		newLine = append(newLine, r...)
 	} else if pos.Column == 0 {
-		newLine = append(newLine, cells...)
+		newLine = append(newLine, r...)
 		newLine = append(newLine, line...)
 	} else {
 		newLine = append(newLine, line[:pos.Column]...)
-		newLine = append(newLine, cells...)
+		newLine = append(newLine, r...)
 		newLine = append(newLine, line[pos.Column:lenLine]...)
 	}
-	rows[k] = widget.TextGridRow{Cells: newLine, Style: rows[k].Style}
+	rows[k] = newLine
 
 	// adjust tags
-	lastPos := CharPos{Line: len(z.Rows) - 1, Column: len(z.Rows[len(z.Rows)-1].Cells) - 1}
+	lastPos := CharPos{Line: len(z.Rows) - 1, Column: len(z.Rows[len(z.Rows)-1]) - 1}
 	tags, ok := z.Tags.LookupRange(CharInterval{Start: pos, End: lastPos})
 	if ok {
 		for _, tag := range tags {
+			if tag == nil {
+				continue
+			}
 			interval, ok := z.Tags.Lookup(tag)
 			if !ok {
 				log.Printf(`WARN tag "%v" has no associated interval [Insert]\n`, tag.Name())
@@ -1120,7 +1168,7 @@ func (z *Editor) Insert(cells []widget.TextGridCell, pos CharPos) {
 	cline = pos.Line - startRow
 	ccol = pos.Column
 	if z.LineWrap {
-		rows, cline, ccol = z.WordWrapTextGridRows(rows, z.Columns, z.SoftWrap, z.HardLF, z.SoftLF,
+		rows, cline, ccol = z.WordWrapRows(rows, z.Columns, z.SoftWrap, z.HardLF, z.SoftLF,
 			cline, ccol, startRow, tags, pos)
 	}
 	z.CaretPos = CharPos{Line: cline + startRow, Column: ccol}
@@ -1132,7 +1180,7 @@ func (z *Editor) Insert(cells []widget.TextGridCell, pos CharPos) {
 	}
 	// check if we need to insert additional rows
 	if lineDelta > 0 {
-		newRows := make([]widget.TextGridRow, len(rows)-(endRow-startRow+1))
+		newRows := makeEmptyRows(len(rows) - (endRow - startRow + 1))
 		z.Rows = slices.Insert(z.Rows, endRow+1, newRows...)
 		z.adjustTagLines(tags, lineDelta, pos)
 	}
@@ -1146,6 +1194,9 @@ func (z *Editor) Insert(cells []widget.TextGridCell, pos CharPos) {
 // of the tag interval need to be adjusted by lineDelta lines. Otherwise, the only the end line needs to be adjusted.
 func (z *Editor) adjustTagLines(tags []Tag, lineDelta int, insertPos CharPos) {
 	for _, tag := range tags {
+		if tag == nil {
+			continue
+		}
 		interval, ok := z.Tags.Lookup(tag)
 		if !ok {
 			log.Printf(`WARN tag "%v" has no associated interval [adjustTags]\n`, tag.Name())
@@ -1172,21 +1223,29 @@ func (z *Editor) Delete(fromTo CharInterval) {
 	cursorRow := z.CaretPos.Line
 	cursorColumn := z.CaretPos.Column
 	pos := fromTo.Start
-	lastPos := CharPos{Line: len(z.Rows) - 1, Column: len(z.Rows[len(z.Rows)-1].Cells) - 1}
-	tags, _ := z.Tags.LookupRange(CharInterval{Start: pos, End: lastPos})
-
-	// adjust tags TODO not working at all
-	for _, tag := range tags {
-		interval, ok := z.Tags.Lookup(tag)
-		if !ok {
-			log.Printf(`WARN tag "%v" has no associated interval [adjustTags]\n`, tag.Name())
-			continue // non-fatal error, ignore
+	lastPos := CharPos{Line: len(z.Rows) - 1, Column: len(z.Rows[len(z.Rows)-1]) - 1}
+	tags, ok := z.Tags.LookupRange(CharInterval{Start: pos, End: lastPos})
+	if !ok {
+		log.Println("NO TAG FOUND")
+	}
+	if ok {
+		for _, tag := range tags {
+			if tag == nil {
+				log.Println(`WARN tag is nil [Delete]`)
+				continue
+			}
+			interval, ok := z.Tags.Lookup(tag)
+			if !ok {
+				log.Printf(`WARN tag "%v" has no associated interval [Delete]\n`, tag.Name())
+				continue // non-fatal error, ignore
+			}
+			z.maybeAdjustTagIntervalForDelete(tag, interval, fromTo)
 		}
-		z.maybeAdjustTagIntervalForDelete(tag, interval, fromTo)
 	}
 
+	rowNumBefore := len(z.Rows)
 	// delete the range from fromTo.Start.Line to fromTo.End.Line in the Rows
-	var underflow []widget.TextGridCell
+	var underflow []rune
 	for i := fromTo.End.Line; i >= fromTo.Start.Line; i-- {
 		if fromTo.Start.Line < i && i < fromTo.End.Line {
 			z.Rows = slices.Delete(z.Rows, i, i+1)
@@ -1194,18 +1253,18 @@ func (z *Editor) Delete(fromTo CharInterval) {
 		}
 		row := z.Rows[i]
 		if i == fromTo.Start.Line && i == fromTo.End.Line {
-			row.Cells = slices.Delete(row.Cells, fromTo.Start.Column, fromTo.End.Column+1)
+			row = slices.Delete(row, fromTo.Start.Column, fromTo.End.Column+1)
 			if cursorRow == i && cursorColumn >= fromTo.Start.Column {
 				cursorColumn = fromTo.Start.Column
 			}
 		} else if i == fromTo.Start.Line {
-			row.Cells = slices.Delete(row.Cells, fromTo.Start.Column, len(row.Cells))
+			row = slices.Delete(row, fromTo.Start.Column, len(row))
 			if underflow != nil {
-				row.Cells = append(row.Cells, underflow...)
-				cursorColumn = len(row.Cells) - len(underflow)
+				row = append(row, underflow...)
+				cursorColumn = len(row) - len(underflow)
 				underflow = nil
 			}
-			if len(row.Cells) == 0 && i > 0 {
+			if i > 0 && (len(row) == 0 || row[0] == z.SoftLF || row[0] == z.HardLF) {
 				z.Rows = slices.Delete(z.Rows, i, i+1)
 				cursorColumn = 0
 				cursorRow = i
@@ -1215,9 +1274,9 @@ func (z *Editor) Delete(fromTo CharInterval) {
 				cursorRow = i
 			}
 		} else if i == fromTo.End.Line {
-			if fromTo.End.Column < len(row.Cells)-2 {
-				underflow = slices.Clone(row.Cells[fromTo.End.Column+1:])
-				row.Cells = slices.Delete(row.Cells, 0, fromTo.End.Column+1)
+			if fromTo.End.Column < len(row)-2 {
+				underflow = slices.Clone(row[fromTo.End.Column+1:])
+				row = slices.Delete(row, 0, fromTo.End.Column+1)
 			}
 			z.Rows = slices.Delete(z.Rows, i, i+1)
 			continue
@@ -1227,30 +1286,29 @@ func (z *Editor) Delete(fromTo CharInterval) {
 	// now we reflow with word wrap like in wrap-insert-zgrid
 	paraStart := z.FindParagraphStart(fromTo.Start.Line, z.HardLF)
 	paraEnd := z.FindParagraphEnd(fromTo.Start.Line, z.HardLF)
-	rows := make([]widget.TextGridRow, paraEnd-paraStart+1)
+	rows := make([][]rune, paraEnd-paraStart+1)
 	for i := range rows {
 		rows[i] = z.Rows[i+paraStart]
 	}
 	newCursorRow := cursorRow
 	newCursorCol := cursorColumn
-	lineDelta := len(rows) - (paraEnd - paraStart + 1)
-	rows, newCursorRow, newCursorCol = z.WordWrapTextGridRows(rows, z.Columns, z.SoftWrap, z.HardLF,
+	rows, newCursorRow, newCursorCol = z.WordWrapRows(rows, z.Columns, z.SoftWrap, z.HardLF,
 		z.SoftLF, newCursorRow-paraStart, newCursorCol, paraStart, tags, pos)
 	// check if we need to delete rows
 	if len(rows) < paraEnd-paraStart+1 {
 		z.Rows = slices.Delete(z.Rows, paraStart+len(rows), paraEnd+1)
-		z.adjustTagLines(tags, lineDelta, pos)
 	}
 	// check if we need to insert additional rows
 	if len(rows) > paraEnd-paraStart+1 {
-		newRows := make([]widget.TextGridRow, len(rows)-(paraEnd-paraStart+1))
+		newRows := makeEmptyRows(len(rows) - (paraEnd - paraStart + 1))
 		z.Rows = slices.Insert(z.Rows, paraEnd+1, newRows...)
-		z.adjustTagLines(tags, lineDelta, pos)
 	}
 	for i := range rows {
 		z.Rows[i+paraStart] = rows[i]
 	}
-	z.SetCaret(CharPos{Line: newCursorRow + paraStart, Column: min(newCursorCol, len(z.Rows[newCursorRow+paraStart].Cells)-1)})
+	lineDelta := rowNumBefore - len(z.Rows)
+	z.adjustTagLines(tags, lineDelta, pos)
+	z.SetCaret(CharPos{Line: newCursorRow + paraStart, Column: min(newCursorCol, len(z.Rows[newCursorRow+paraStart])-1)})
 	z.Refresh()
 }
 
@@ -1260,7 +1318,7 @@ func (z *Editor) PrevPos(pos CharPos) (CharPos, bool) {
 		return CharPos{Line: 0, Column: 0}, false
 	}
 	if pos.Column == 0 {
-		return CharPos{Line: pos.Line - 1, Column: len(z.Rows[pos.Line-1].Cells) - 1}, true
+		return CharPos{Line: pos.Line - 1, Column: len(z.Rows[pos.Line-1]) - 1}, true
 	}
 	return CharPos{Line: pos.Line, Column: pos.Column - 1}, true
 }
@@ -1280,25 +1338,29 @@ func (z *Editor) PrevPos(pos CharPos) (CharPos, bool) {
 func (z *Editor) maybeAdjustTagIntervalForDelete(tag Tag, interval, fromTo CharInterval) {
 	// Case 4: fromTo is strictly after interval => Do nothing.
 	if CmpPos(fromTo.Start, interval.End) > 0 {
+		log.Println("CASE 4")
 		return
 	}
 	lineDelta := fromTo.Start.Line - fromTo.End.Line
-	log.Println(lineDelta)
 	columnDelta := fromTo.End.Column
 	if fromTo.Start.Line == fromTo.End.Line {
 		columnDelta -= fromTo.Start.Column
+		columnDelta++
 	}
 	columnDelta = -columnDelta
+	log.Println(columnDelta)
 	if CmpPos(fromTo.End, interval.Start) < 0 {
 		// Cases 5 and 6.
 		if fromTo.End.Line < interval.Start.Line {
 			// Case 6: We shift the interval by lineDelta, no other changes needed.
+			log.Println("CASE 6")
 			newInterval := CharInterval{Start: CharPos{Line: interval.Start.Line + lineDelta, Column: interval.Start.Column},
 				End: CharPos{Line: interval.End.Line + lineDelta, Column: interval.End.Column}}
 			z.Tags.Upsert(tag, newInterval)
 			return
 		}
 		// Case 5: We shift the interval by lineDelta but also have to shift the start column.
+		log.Println("CASE 5")
 		var newInterval CharInterval
 		if interval.Start.Line == interval.End.Line {
 			// Special case: The interval ends on the same line, so the end has to be adjusted, too.
@@ -1313,12 +1375,14 @@ func (z *Editor) maybeAdjustTagIntervalForDelete(tag Tag, interval, fromTo CharI
 	}
 	if CmpPos(fromTo.Start, interval.Start) <= 0 && CmpPos(fromTo.End, interval.End) >= 0 {
 		// Case 3: We can delete the tag, because the entire interval is being deleted.
+		log.Println("CASE 3")
 		z.Tags.Delete(tag)
 		return
 	}
 	if CmpPos(fromTo.Start, interval.Start) >= 0 && CmpPos(fromTo.End, interval.End) <= 0 {
 		// Case 1: The deletion interval is within the interval. (Note: Exact equality already handled above.)
 		// Only the end column has to be adjusted. Whatever is deleted in the start line does not affect the interval.
+		log.Println("CASE 1")
 		if fromTo.End.Line != interval.End.Line {
 			columnDelta = 0
 		}
@@ -1329,6 +1393,7 @@ func (z *Editor) maybeAdjustTagIntervalForDelete(tag Tag, interval, fromTo CharI
 	}
 	if CmpPos(fromTo.Start, interval.Start) < 0 {
 		// Case 2: The new interval starts at fromTo.Start. We may need to adjust the end column and need to subtract lineDelta.
+		log.Println("CASE 2")
 		if fromTo.End.Line != interval.End.Line {
 			columnDelta = 0
 		}
@@ -1339,6 +1404,7 @@ func (z *Editor) maybeAdjustTagIntervalForDelete(tag Tag, interval, fromTo CharI
 	}
 	if CmpPos(fromTo.Start, interval.Start) >= 0 && CmpPos(fromTo.End, interval.End) > 0 {
 		// Case 7: Adjust by lineDelta and the new column will be fromTo. Start.
+		log.Println("CASE 7")
 		newInterval := CharInterval{Start: interval.Start, End: fromTo.Start}
 		z.Tags.Upsert(tag, newInterval)
 		return
@@ -1348,10 +1414,10 @@ func (z *Editor) maybeAdjustTagIntervalForDelete(tag Tag, interval, fromTo CharI
 
 // NextPos returns the next char position in the grid and true, or the last position and false if there is no more.
 func (z *Editor) NextPos(pos CharPos) (CharPos, bool) {
-	if pos.Line >= len(z.Rows)-1 && pos.Column >= len(z.Rows[pos.Line].Cells)-1 {
-		return CharPos{Line: len(z.Rows) - 1, Column: len(z.Rows[len(z.Rows)-1].Cells) - 1}, false
+	if pos.Line >= len(z.Rows)-1 && pos.Column >= len(z.Rows[pos.Line])-1 {
+		return CharPos{Line: len(z.Rows) - 1, Column: len(z.Rows[len(z.Rows)-1]) - 1}, false
 	}
-	if pos.Column >= len(z.Rows[pos.Line].Cells)-1 {
+	if pos.Column >= len(z.Rows[pos.Line])-1 {
 		return CharPos{Line: pos.Line + 1, Column: 0}, true
 	}
 	return CharPos{Line: pos.Line, Column: pos.Column + 1}, true
@@ -1378,17 +1444,14 @@ func (z *Editor) Delete1() {
 func (z *Editor) Return() {
 	pos := z.CaretPos
 	if pos.Column == 0 {
-		z.Rows = slices.Insert(z.Rows, pos.Line, widget.TextGridRow{
-			Cells: []widget.TextGridCell{{Rune: z.HardLF, Style: nil}},
-			Style: nil,
-		})
+		z.Rows = slices.Insert(z.Rows, pos.Line, []rune{z.HardLF})
 		z.MoveCaret(CaretDown)
 		z.Refresh()
 		return
 	}
-	buff := z.Rows[pos.Line].Cells[pos.Column:]
-	z.Rows[pos.Line].Cells = z.Rows[pos.Line].Cells[:pos.Column]
-	z.Rows = slices.Insert(z.Rows, pos.Line+1, widget.TextGridRow{Cells: slices.Clone(buff), Style: nil})
+	buff := z.Rows[pos.Line][pos.Column:]
+	z.Rows[pos.Line] = z.Rows[pos.Line][:pos.Column]
+	z.Rows = slices.Insert(z.Rows, pos.Line+1, slices.Clone(buff))
 	z.Refresh()
 	z.MoveCaret(CaretRight)
 }
@@ -1397,7 +1460,7 @@ func (z *Editor) Return() {
 
 // maybeStyleRange styles the given char interval by style insofar as it is within
 // the visible range of the underlying TextGrid (otherwise, nothing is done).
-func (z *Editor) maybeStyleRange(interval CharInterval, styler TagStyleFunc, drawFullLine bool) {
+func (z *Editor) maybeStyleRange(tag Tag, interval CharInterval, styler TagStyleFunc, drawFullLine bool) {
 	if z.currentViewport().OutsideOf(interval) {
 		return
 	}
@@ -1409,24 +1472,10 @@ func (z *Editor) maybeStyleRange(interval CharInterval, styler TagStyleFunc, dra
 		for j := range z.Columns {
 			xj := j + z.columnOffset
 			if interval.Contains(CharPos{Line: xi, Column: xj}) {
-				z.grid.SetCell(i, j, styler(z.grid.Rows[i].Cells[j]))
+				z.grid.Rows[i].Cells[j] = styler(tag, z.grid.Rows[i].Cells[j])
+				// z.grid.SetCell(i, j, styler(tag, z.grid.Rows[i].Cells[j]))
 			}
 		}
-	}
-	z.grid.Refresh()
-}
-
-// maybeStyleLineRange is the same as maybeStyleRange except that a TagLineStyleFunc
-// is used and only the style of the line as a whole is set.
-func (z *Editor) maybeStyleLineRange(interval CharInterval, styler TagLineStyleFunc) {
-	viewPort := z.currentViewport()
-	if interval.OutsideOf(viewPort) {
-		return
-	}
-	rangeStart := MaxPos(viewPort.Start, interval.Start)
-	rangeEnd := MinPos(viewPort.End, interval.End)
-	for i := rangeStart.Line; i <= rangeEnd.Line; i++ {
-		z.grid.SetRowStyle(i, styler(z.grid.Rows[i].Style))
 	}
 }
 
@@ -1490,8 +1539,8 @@ func SafePositiveValue(value int, maximum int) int {
 // WORD WRAPPING
 // Ad hoc struct for holding text grid cells plus hosuekeeping info.
 type xCell struct {
-	Cell         widget.TextGridCell
-	Row          *widget.TextGridRow
+	Rune         rune
+	Row          *[]rune
 	IsCursorCell bool
 	tags         []xTag
 }
@@ -1503,24 +1552,24 @@ type xTag struct {
 	isStart bool
 }
 
-// WordWrapTextGridRows word wraps a number of text grid rows, making sure soft line breaks are adjusted
+// WordWrapRows word wraps a number of rows, making sure soft line breaks are adjusted
 // and removed accordingly. The number of rows returned may be larger than the number of rows
 // provided as an argument. The position of the original cursor row and column is returned.
-func (z *Editor) WordWrapTextGridRows(rows []widget.TextGridRow, wrapCol int,
+func (z *Editor) WordWrapRows(rows [][]rune, wrapCol int,
 	softWrap bool, hardLF, softLF rune, cursorRow, cursorCol, startRow int,
-	tags []Tag, pos CharPos) ([]widget.TextGridRow, int, int) {
+	tags []Tag, pos CharPos) ([][]rune, int, int) {
 	para := make([]xCell, 0)
 	// 1. push all characters into one array of extended cells
 	// but ignore line breaks
 	cursorToNext := false
 	for i := range rows {
-		for j, c := range rows[i].Cells {
+		for j, c := range rows[i] {
 			isCursor := false
 			if (i == cursorRow && j == cursorCol) || cursorToNext {
 				isCursor = true
 				cursorToNext = false
 			}
-			if (c.Rune == hardLF && j == len(rows[i].Cells)-1) || c.Rune == softLF {
+			if (c == hardLF && j == len(rows[i])-1) || c == softLF {
 				if i == cursorRow && j == cursorCol {
 					cursorToNext = true // delete LF but make sure cursor will be on next char
 				}
@@ -1528,6 +1577,9 @@ func (z *Editor) WordWrapTextGridRows(rows []widget.TextGridRow, wrapCol int,
 				var tg []xTag
 				line := startRow + i
 				for _, tag := range tags {
+					if tag == nil {
+						continue
+					}
 					interval, found := z.Tags.Lookup(tag)
 					if !found {
 						continue
@@ -1547,20 +1599,20 @@ func (z *Editor) WordWrapTextGridRows(rows []widget.TextGridRow, wrapCol int,
 						tg = append(tg, xTag{tag: tag, isStart: false})
 					}
 				}
-				para = append(para, xCell{Cell: c, Row: &rows[i], IsCursorCell: isCursor, tags: tg})
+				para = append(para, xCell{Rune: c, Row: &rows[i], IsCursorCell: isCursor, tags: tg})
 			}
 		}
 	}
 	// 2. now word break the paragraph and push into a result array
 	// adding soft line breaks, and the final hard line break
-	result := make([]widget.TextGridRow, 0)
+	result := make([][]rune, 0)
 	lastSpc := 0
 	line := make([]xCell, 0, wrapCol+1)
 	var overflow []xCell
 	col := 0
 	newCol := cursorCol
 	newRow := 0
-	var currentRow widget.TextGridRow
+	var currentRow []rune
 	var handled bool
 	lpos := 0
 	lineIdx := 0
@@ -1569,7 +1621,7 @@ func (z *Editor) WordWrapTextGridRows(rows []widget.TextGridRow, wrapCol int,
 		c := para[i]
 		lpos++
 		line = append(line, c)
-		if unicode.IsSpace(c.Cell.Rune) {
+		if unicode.IsSpace(c.Rune) {
 			lastSpc = lpos // space position + 1 because of lpos++
 		}
 		if lpos >= wrapCol {
@@ -1582,7 +1634,7 @@ func (z *Editor) WordWrapTextGridRows(rows []widget.TextGridRow, wrapCol int,
 				overflow = append(overflow, line[cutPos:]...)
 				line = line[:cutPos]
 			}
-			currentRow, col = xCellsToTextGridRow(line)
+			currentRow, col = xCellsToRow(line)
 
 			// adjust the tags if necessary
 			z.adjustTags(line, startRow, lineIdx)
@@ -1611,7 +1663,7 @@ func (z *Editor) WordWrapTextGridRows(rows []widget.TextGridRow, wrapCol int,
 		}
 	}
 	if !handled {
-		currentRow, col = xCellsToTextGridRow(line)
+		currentRow, col = xCellsToRow(line)
 		z.adjustTags(line, startRow, lineIdx)
 		if col >= 0 {
 			newCol = col
@@ -1623,14 +1675,14 @@ func (z *Editor) WordWrapTextGridRows(rows []widget.TextGridRow, wrapCol int,
 	}
 	for i := range result {
 		if softWrap {
-			result[i].Cells = append(result[i].Cells, widget.TextGridCell{Rune: softLF, Style: nil})
+			result[i] = append(result[i], softLF)
 		} else {
-			result[i].Cells = append(result[i].Cells, widget.TextGridCell{Rune: hardLF, Style: nil})
+			result[i] = append(result[i], hardLF)
 		}
 	}
 	k := len(result) - 1
-	n := len(result[k].Cells) - 1
-	result[k].Cells[n] = widget.TextGridCell{Rune: hardLF, Style: nil}
+	n := len(result[k]) - 1
+	result[k][n] = hardLF
 	// The following can *only* happen if the cursor was at the very last LF,
 	// which had been deleted; see Step 1 above. So we set it to the pragraph end.
 	if cursorToNext {
@@ -1665,19 +1717,19 @@ outer:
 	}
 }
 
-func xCellsToTextGridRow(cells []xCell) (widget.TextGridRow, int) {
+func xCellsToRow(cells []xCell) ([]rune, int) {
 	if len(cells) == 0 {
-		return widget.TextGridRow{Cells: make([]widget.TextGridCell, 0), Style: nil}, -1
+		return make([]rune, 0), -1
 	}
-	result := make([]widget.TextGridCell, len(cells))
+	result := make([]rune, len(cells))
 	col := -1
 	for i, c := range cells {
-		result[i] = c.Cell
+		result[i] = c.Rune
 		if c.IsCursorCell {
 			col = i
 		}
 	}
-	return widget.TextGridRow{Cells: result, Style: cells[0].Row.Style}, col
+	return result, col
 }
 
 func cellsContainCursor(cells []xCell) bool {
@@ -1693,4 +1745,13 @@ func cellsContainCursor(cells []xCell) bool {
 // false otherwise.
 func inSelectionRange(startRow, startCol, endRow, endCol, row, col int) bool {
 	return (row == startRow && col >= startCol) || (row == endRow && col <= endCol) || (row > startRow && row < endRow)
+}
+
+// makeEmptyRows creates n text rows initialized to hold a single glyph '\n'
+func makeEmptyRows(n int) [][]rune {
+	rows := make([][]rune, n)
+	for i := range rows {
+		rows[i] = make([]rune, 0)
+	}
+	return rows
 }
