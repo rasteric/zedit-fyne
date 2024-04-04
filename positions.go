@@ -73,6 +73,11 @@ func (c1 CharInterval) Overlapping(c2 CharInterval) bool {
 	return !c2.OutsideOf(c2)
 }
 
+// Lines returns the number of lines this interval spans, including start and end line.
+func (c CharInterval) Lines() int {
+	return c.End.Line - c.Start.Line + 1
+}
+
 // MaybeSwap compares the start and the end, and if the end is before
 // the start returns the interval where the end is the start and the start is the end.
 // The function returns the unchanged interval otherwise.
@@ -81,9 +86,4 @@ func (c CharInterval) MaybeSwap() CharInterval {
 		return CharInterval{Start: c.End, End: c.Start}
 	}
 	return c
-}
-
-// Lines returns the number of lines, including incomplete lines of the interval.
-func (c CharInterval) Lines() int {
-	return c.End.Line - c.Start.Line + 1
 }

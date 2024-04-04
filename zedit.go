@@ -1220,14 +1220,15 @@ func (z *Editor) adjustTagLines(tags []Tag, lineDelta int, insertPos CharPos) {
 // and softLF runes as hard and soft line feed characters.
 func (z *Editor) Delete(fromTo CharInterval) {
 	z.RemoveSelection()
-	cursorRow := z.CaretPos.Line
-	cursorColumn := z.CaretPos.Column
+
+	// We look up the tags starting at or after the deletion start position.
 	pos := fromTo.Start
 	lastPos := CharPos{Line: len(z.Rows) - 1, Column: len(z.Rows[len(z.Rows)-1]) - 1}
 	tags, ok := z.Tags.LookupRange(CharInterval{Start: pos, End: lastPos})
 	if !ok {
 		log.Println("NO TAG FOUND")
 	}
+	// The tags are now adjusted for the deletion interval (many cases to consider). Word wrapping is handled seperately.
 	if ok {
 		for _, tag := range tags {
 			if tag == nil {
@@ -1244,46 +1245,51 @@ func (z *Editor) Delete(fromTo CharInterval) {
 	}
 
 	rowNumBefore := len(z.Rows)
-	// delete the range from fromTo.Start.Line to fromTo.End.Line in the Rows
-	var underflow []rune
-	for i := fromTo.End.Line; i >= fromTo.Start.Line; i-- {
-		if fromTo.Start.Line < i && i < fromTo.End.Line {
-			z.Rows = slices.Delete(z.Rows, i, i+1)
-			continue
+
+	if fromTo.Start.Line == fromTo.End.Line && fromTo.Start.Column == z.LastColumn(fromTo.Start.Line) {
+		// SPECIAL CASE: The very last char of a line is removed, which must be a line ending delimiter.
+		// If there is a next line, it is appended to this line, including its delimiter.
+		z.Rows[fromTo.Start.Line] = slices.Delete(z.Rows[fromTo.Start.Line], fromTo.Start.Column,
+			fromTo.Start.Column+1)
+		if z.LastLine() > fromTo.Start.Line {
+			z.Rows[fromTo.Start.Line] = append(z.Rows[fromTo.Start.Line], slices.Clone(z.Rows[fromTo.Start.Line+1])...)
+			z.Rows = slices.Delete(z.Rows, fromTo.Start.Line+1, fromTo.Start.Line+2)
 		}
-		row := z.Rows[i]
-		if i == fromTo.Start.Line && i == fromTo.End.Line {
-			row = slices.Delete(row, fromTo.Start.Column, fromTo.End.Column+1)
-			if cursorRow == i && cursorColumn >= fromTo.Start.Column {
-				cursorColumn = fromTo.Start.Column
-			}
-		} else if i == fromTo.Start.Line {
-			row = slices.Delete(row, fromTo.Start.Column, len(row))
-			if underflow != nil {
-				row = append(row, underflow...)
-				cursorColumn = len(row) - len(underflow)
-				underflow = nil
-			}
-			if i > 0 && (len(row) == 0 || row[0] == z.SoftLF || row[0] == z.HardLF) {
-				z.Rows = slices.Delete(z.Rows, i, i+1)
-				cursorColumn = 0
-				cursorRow = i
-			} else if inSelectionRange(fromTo.Start.Line, fromTo.Start.Column,
-				fromTo.End.Line, fromTo.End.Column, cursorRow, cursorColumn) {
-				cursorColumn = fromTo.Start.Column
-				cursorRow = i
-			}
-		} else if i == fromTo.End.Line {
-			if fromTo.End.Column < len(row)-2 {
-				underflow = slices.Clone(row[fromTo.End.Column+1:])
-				row = slices.Delete(row, 0, fromTo.End.Column+1)
-			}
-			z.Rows = slices.Delete(z.Rows, i, i+1)
-			continue
+		// Adjust the caret for this case.
+		if z.CaretPos.Line == fromTo.Start.Line+1 {
+			z.SetCaret(fromTo.Start)
 		}
-		z.Rows[i] = row
+	} else {
+		// NORMAL CASE: Delete the range from fromTo.Start.Line to fromTo.End.Line in the Rows.
+		// Whatever is behind this range on the end line is added to the start line.
+		underflow := slices.Clone(z.Rows[fromTo.End.Line][fromTo.End.Column+1:])
+		z.Rows[fromTo.Start.Line] = z.Rows[fromTo.Start.Line][:fromTo.Start.Column]
+		z.Rows[fromTo.Start.Line] = append(z.Rows[fromTo.Start.Line], underflow...)
+		z.Rows = slices.Delete(z.Rows, fromTo.Start.Line+1, fromTo.End.Line+1)
+		// Adjust the caret as needed for this case.
+		if CmpPos(fromTo.End, z.CaretPos) < 0 {
+			if fromTo.End.Line == z.CaretPos.Line {
+				z.SetCaret(CharPos{Line: z.CaretPos.Line - (fromTo.End.Line - fromTo.Start.Line),
+					Column: fromTo.Start.Column + (z.CaretPos.Column - fromTo.End.Column) - 1})
+			} else {
+				z.SetCaret(CharPos{Line: z.CaretPos.Line - (fromTo.End.Line - fromTo.Start.Line),
+					Column: z.CaretPos.Column})
+			}
+		} else if CmpPos(fromTo.Start, z.CaretPos) <= 0 {
+			z.SetCaret(fromTo.Start)
+		}
 	}
-	// now we reflow with word wrap like in wrap-insert-zgrid
+
+	// The first line might be empty now. If so, we add an appropriate line ending.
+	if len(z.Rows[fromTo.Start.Line]) == 0 {
+		if z.SoftWrap {
+			z.Rows[fromTo.Start.Line] = append(z.Rows[fromTo.Start.Line], z.SoftLF)
+		} else {
+			z.Rows[fromTo.Start.Line] = append(z.Rows[fromTo.Start.Line], z.HardLF)
+		}
+	}
+
+	// Now we reflow with word wrap like in Insert.
 	paraStart := z.FindParagraphStart(fromTo.Start.Line, z.HardLF)
 	paraEnd := z.FindParagraphEnd(fromTo.Start.Line, z.HardLF)
 	rows := make([][]rune, paraEnd-paraStart+1)
@@ -1292,15 +1298,17 @@ func (z *Editor) Delete(fromTo CharInterval) {
 	}
 	lastPos = CharPos{Line: len(z.Rows) - 1, Column: len(z.Rows[len(z.Rows)-1]) - 1}
 	tags, ok = z.Tags.LookupRange(CharInterval{Start: pos, End: lastPos})
-	newCursorRow := cursorRow
-	newCursorCol := cursorColumn
-	rows, newCursorRow, newCursorCol = z.WordWrapRows(rows, z.Columns, z.SoftWrap, z.HardLF,
-		z.SoftLF, newCursorRow-paraStart, newCursorCol, paraStart, tags, pos)
-	// check if we need to delete rows
+	// newCursorRow := z.CaretPos.Line
+	// newCursorCol := z.CaretPos.Column
+	// rows, newCursorRow, newCursorCol = z.WordWrapRows(rows, z.Columns, z.SoftWrap, z.HardLF,
+	//	z.SoftLF, newCursorRow-paraStart, newCursorCol, paraStart, tags, pos)
+
+	// Check if we need to delete rows.
 	if len(rows) < paraEnd-paraStart+1 {
 		z.Rows = slices.Delete(z.Rows, paraStart+len(rows), paraEnd+1)
 	}
-	// check if we need to insert additional rows
+
+	// Check if we need to insert additional rows.
 	if len(rows) > paraEnd-paraStart+1 {
 		newRows := makeEmptyRows(len(rows) - (paraEnd - paraStart + 1))
 		z.Rows = slices.Insert(z.Rows, paraEnd+1, newRows...)
@@ -1309,8 +1317,9 @@ func (z *Editor) Delete(fromTo CharInterval) {
 		z.Rows[i+paraStart] = rows[i]
 	}
 	lineDelta := rowNumBefore - len(z.Rows)
-	z.adjustTagLines(tags, lineDelta, pos)
-	z.SetCaret(CharPos{Line: newCursorRow + paraStart, Column: min(newCursorCol, len(z.Rows[newCursorRow+paraStart])-1)})
+	_ = lineDelta
+	// z.adjustTagLines(tags, lineDelta, pos)
+	//z.SetCaret(CharPos{Line: newCursorRow + paraStart, Column: min(newCursorCol, len(z.Rows[newCursorRow+paraStart])-1)})
 	z.Refresh()
 }
 
@@ -1343,7 +1352,8 @@ func (z *Editor) maybeAdjustTagIntervalForDelete(tag Tag, interval, fromTo CharI
 		log.Println("CASE 4")
 		return
 	}
-	lineDelta := fromTo.Start.Line - fromTo.End.Line
+	lineDelta := fromTo.End.Line - fromTo.Start.Line
+	lineDelta = -lineDelta
 	columnDelta := fromTo.End.Column
 	if fromTo.Start.Line == fromTo.End.Line {
 		columnDelta -= fromTo.Start.Column
@@ -1364,13 +1374,15 @@ func (z *Editor) maybeAdjustTagIntervalForDelete(tag Tag, interval, fromTo CharI
 		// Case 5: We shift the interval by lineDelta but also have to shift the start column.
 		log.Println("CASE 5")
 		var newInterval CharInterval
+		diff1 := interval.Start.Column - fromTo.End.Column
 		if interval.Start.Line == interval.End.Line {
 			// Special case: The interval ends on the same line, so the end has to be adjusted, too.
-			newInterval = CharInterval{Start: CharPos{Line: interval.Start.Line + lineDelta, Column: interval.Start.Column + columnDelta},
-				End: CharPos{Line: interval.End.Line + lineDelta, Column: interval.End.Column + columnDelta}}
+			newInterval = CharInterval{Start: CharPos{Line: fromTo.Start.Line, Column: fromTo.Start.Column + diff1 - 1},
+				End: CharPos{Line: fromTo.Start.Line,
+					Column: fromTo.Start.Column + (interval.End.Column - interval.Start.Column) + diff1 - 1}}
 		} else {
-			newInterval = CharInterval{Start: CharPos{Line: interval.Start.Line + lineDelta, Column: interval.Start.Column + columnDelta},
-				End: CharPos{Line: interval.End.Line + lineDelta, Column: interval.End.Column}}
+			newInterval = CharInterval{Start: CharPos{Line: fromTo.Start.Line, Column: fromTo.Start.Column + diff1 - 1},
+				End: CharPos{Line: fromTo.Start.Line + (interval.End.Line - interval.Start.Line), Column: interval.End.Column}}
 		}
 		z.Tags.Upsert(tag, newInterval)
 		return
@@ -1388,8 +1400,13 @@ func (z *Editor) maybeAdjustTagIntervalForDelete(tag Tag, interval, fromTo CharI
 		if fromTo.End.Line != interval.End.Line {
 			columnDelta = 0
 		}
+		lfRemoved := 0
+		if fromTo.Start.Line == fromTo.End.Line && fromTo.Start.Column == z.LastColumn(fromTo.Start.Line) {
+			lfRemoved = -1
+		}
 		newInterval := CharInterval{Start: CharPos{Line: interval.Start.Line, Column: interval.Start.Column},
-			End: CharPos{Line: interval.End.Line + lineDelta, Column: interval.End.Column + columnDelta}}
+			End: CharPos{Line: interval.End.Line - fromTo.Lines() + 1 + lfRemoved,
+				Column: interval.End.Column + columnDelta}}
 		z.Tags.Upsert(tag, newInterval)
 		return
 	}
