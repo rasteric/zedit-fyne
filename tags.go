@@ -236,37 +236,3 @@ func (t *TagContainer) Stylers() []TagStyler {
 	defer t.mutex.Unlock()
 	return t.stylers
 }
-
-type CellBuffer struct {
-	buffs map[string][]widget.TextGridCell
-}
-
-func NewCellBuffer() *CellBuffer {
-	b := CellBuffer{}
-	b.buffs = make(map[string][]widget.TextGridCell)
-	return &b
-}
-
-func (b *CellBuffer) AppendCell(tag Tag, cell widget.TextGridCell) {
-	cells, ok := b.buffs[tag.Name()]
-	if !ok {
-		cells = make([]widget.TextGridCell, 0)
-	}
-	cells = append(cells, cell)
-	b.buffs[tag.Name()] = cells
-}
-
-func (b *CellBuffer) GetCell(tag Tag, i int) (widget.TextGridCell, bool) {
-	cells, ok := b.buffs[tag.Name()]
-	if !ok {
-		return widget.TextGridCell{}, false
-	}
-	if i > len(cells)-1 || i < 0 {
-		return widget.TextGridCell{}, false
-	}
-	return cells[i], true
-}
-
-func (b *CellBuffer) RemoveCells(tag Tag) {
-	delete(b.buffs, tag.Name())
-}
