@@ -40,56 +40,10 @@ const (
 	CaretPageUp
 )
 
-type FixedSpacer struct {
-	widget.BaseWidget
-	size fyne.Size
-}
-
-func NewFixedSpacer(size fyne.Size) *FixedSpacer {
-	s := FixedSpacer{size: size}
-	return &s
-}
-
-func (s *FixedSpacer) Size() fyne.Size {
-	return s.size
-}
-
-func (s *FixedSpacer) MinSize() fyne.Size {
-	return s.size
-}
-
-func (s *FixedSpacer) ChangeSize(size fyne.Size) {
-	s.size = size
-}
-
-func (s *FixedSpacer) SetHeight(height float32) {
-	if s != nil {
-		s.size = fyne.Size{Width: s.size.Width, Height: height}
-	}
-}
-
-func (s *FixedSpacer) CreateRenderer() fyne.WidgetRenderer {
-	return &FixedSpacerRenderer{s}
-}
-
-type FixedSpacerRenderer struct {
-	spacer *FixedSpacer
-}
-
-func (r *FixedSpacerRenderer) Destroy() {}
-
-func (r *FixedSpacerRenderer) Layout(size fyne.Size) {}
-
-func (r *FixedSpacerRenderer) MinSize() fyne.Size {
-	return r.spacer.size
-}
-
-func (r *FixedSpacerRenderer) Objects() []fyne.CanvasObject {
-	return []fyne.CanvasObject{}
-}
-
-func (r *FixedSpacerRenderer) Refresh() {}
-
+// Editor is the main editor widget. Even though some of its properties are public, this is merely
+// for convenience and it's best to only modify it using methods. If there is no method for some
+// operation, chances are high that direct manipulation of internals such as editor.Rows might
+// break in the future.
 type Editor struct {
 	widget.BaseWidget
 	Rows               [][]rune
@@ -255,10 +209,12 @@ func (z *Editor) initInternalGrid() {
 	}
 }
 
+// SetLineNumberStyle sets the style of the line number display in terms of an EditorStyle.
 func (z *Editor) SetLineNumberStyle(style EditorStyle) {
 	z.lineNumberStyle = style
 }
 
+// SelectionStyleFunc returns the editor's default selection style func.
 func (z *Editor) SelectionStyleFunc() TagStyleFunc {
 	return TagStyleFunc(func(tag Tag, c widget.TextGridCell) widget.TextGridCell {
 		fg := theme.TextColor()
@@ -345,11 +301,11 @@ func (grid *Editor) FindParagraphStart(row int, lf rune) int {
 	return grid.FindParagraphStart(row-1, lf)
 }
 
-// Text returns the Editor's text as string.
+// Text returns the Editor's text as string. Both soft and hard linefeeds are replaced with rune '\n'.
 func (grid *Editor) Text() string {
 	var sb strings.Builder
 	for i := range grid.Rows {
-		for j := range grid.Rows[i] {
+		for j := range grid.Rows[i][:len(grid.Rows[i])-1] {
 			sb.WriteRune(grid.Rows[i][j])
 		}
 		if i < len(grid.Rows) {
@@ -359,7 +315,7 @@ func (grid *Editor) Text() string {
 	return sb.String()
 }
 
-// SetMark marks a region.
+// SetMark marks a region. The given number must be a valid mark tag index.
 func (z *Editor) SetMark(n int) {
 	sel, hasSelection := z.Tags.Lookup(z.SelectionTag)
 	if !hasSelection {
@@ -397,26 +353,31 @@ func (grid *Editor) FindParagraphEnd(row int, lf rune) int {
 	return grid.FindParagraphEnd(row+1, lf)
 }
 
+// ScrollDown scrolls down the editor's line display by one line.
 func (z *Editor) ScrollDown() {
 	li := min(len(z.Rows)-z.Lines/2, z.lineOffset+1)
 	z.SetTopLine(li)
 }
 
+// ScrollUp scrolls up the editor's line display by one line.
 func (z *Editor) ScrollUp() {
 	li := max(0, z.lineOffset-1)
 	z.SetTopLine(li)
 }
 
+// ScrollRight scrolls to the right by n chars but keeps some chars in display if n higher than the line.
 func (z *Editor) ScrollRight(n int) {
 	z.columnOffset = min(z.maxLineLen-z.Columns/2, z.columnOffset+n)
 	z.Refresh()
 }
 
+// ScrollLeft scrolls to the left by n chars or until the first char if n is too large.
 func (z *Editor) ScrollLeft(n int) {
 	z.columnOffset = max(0, z.columnOffset-n)
 	z.Refresh()
 }
 
+// FocusGained implements a Focusable.
 func (z *Editor) FocusGained() {
 	z.hasFocus = true
 	z.background.StrokeColor = theme.FocusColor()
@@ -424,6 +385,7 @@ func (z *Editor) FocusGained() {
 	z.Refresh()
 }
 
+// FocusLost implements a Focusable.
 func (z *Editor) FocusLost() {
 	z.hasFocus = false
 	z.background.StrokeColor = theme.BackgroundColor()
@@ -431,6 +393,7 @@ func (z *Editor) FocusLost() {
 	z.Refresh()
 }
 
+// Focus sets focus to the editor.
 func (z *Editor) Focus() {
 	z.canvas.Focus(z)
 }
