@@ -1356,10 +1356,10 @@ func (z *Editor) Delete(fromTo CharInterval) {
 		rows[i] = z.Rows[i+paraStart]
 	}
 	tags, ok = z.Tags.LookupRange(z.ToEnd(fromTo.Start))
-	// newCursorRow := z.CaretPos.Line
-	// newCursorCol := z.CaretPos.Column
-	// rows, newCursorRow, newCursorCol = z.WordWrapRows(rows, z.Columns, z.SoftWrap, z.HardLF,
-	//	z.SoftLF, newCursorRow-paraStart, newCursorCol, paraStart, tags, pos)
+	newCursorRow := z.CaretPos.Line
+	newCursorCol := z.CaretPos.Column
+	rows, newCursorRow, newCursorCol = z.WordWrapRows(rows, z.Columns, z.SoftWrap, z.HardLF,
+		z.SoftLF, newCursorRow-paraStart, newCursorCol, paraStart, tags, fromTo.Start)
 
 	// Check if we need to delete rows.
 	if len(rows) < paraEnd-paraStart+1 {
@@ -1375,9 +1375,8 @@ func (z *Editor) Delete(fromTo CharInterval) {
 		z.Rows[i+paraStart] = rows[i]
 	}
 	lineDelta := rowNumBefore - len(z.Rows)
-	_ = lineDelta
-	// z.adjustTagLines(tags, lineDelta, pos)
-	//z.SetCaret(CharPos{Line: newCursorRow + paraStart, Column: min(newCursorCol, len(z.Rows[newCursorRow+paraStart])-1)})
+	z.adjustTagLines(tags, -lineDelta, fromTo.Start)
+	z.SetCaret(CharPos{Line: newCursorRow + paraStart, Column: min(newCursorCol, len(z.Rows[newCursorRow+paraStart])-1)})
 	z.Refresh()
 }
 
