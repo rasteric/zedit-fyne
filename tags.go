@@ -9,6 +9,15 @@ import (
 	"github.com/rdleal/intervalst/interval"
 )
 
+type TagEvent int
+
+const (
+	CaretEnterEvent TagEvent = iota
+	CaretLeaveEvent
+)
+
+type TagFunc func(evt TagEvent, tag Tag, interval CharInterval)
+
 // Tags are used to store information about the editor text associated with intervals.
 // A tag's position is adjusted automatically as the editor text changes.
 // Stylers can be associated to multiple tags with the same name.
@@ -16,12 +25,15 @@ type Tag interface {
 	Name() string           // return the tag's name, which is used for stylers
 	Index() int             // return the tag's new index, indicating a serial number for tags with the same name
 	Clone(newIndex int) Tag // clone the tag, giving it a new index
+	Callback() TagFunc      // called when TagEvents happen
+	SetCallback(cb TagFunc) // set the callback function
 }
 
 // SimpleTag is the default implementation of a Tag.
 type SimpleTag struct {
 	name  string
 	index int
+	cb    TagFunc
 }
 
 type TagStyleFunc func(tag Tag, c widget.TextGridCell) widget.TextGridCell
@@ -44,8 +56,16 @@ func (s *SimpleTag) Index() int {
 	return s.index
 }
 
+func (s *SimpleTag) Callback() TagFunc {
+	return s.cb
+}
+
+func (s *SimpleTag) SetCallback(cb TagFunc) {
+	s.cb = cb
+}
+
 func (s *SimpleTag) Clone(newIndex int) Tag {
-	return &SimpleTag{name: s.name, index: newIndex}
+	return &SimpleTag{name: s.name, index: newIndex, cb: s.cb}
 }
 
 type TagContainer struct {
@@ -67,7 +87,7 @@ func NewTagContainer() *TagContainer {
 func (t *TagContainer) LookupRange(interval CharInterval) ([]Tag, bool) {
 	t.mutex.Lock()
 	defer t.mutex.Unlock()
-	return t.lookup.AnyIntersection(interval.Start, interval.End)
+	return t.lookup.AllIntersections(interval.Start, interval.End)
 }
 
 func (t *TagContainer) Lookup(tag Tag) (CharInterval, bool) {

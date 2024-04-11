@@ -210,6 +210,9 @@ func NewEditor(columns, lines int, c fyne.Canvas) *Editor {
 	markTag := NewTag("mark")
 	for i := range z.MarkTags {
 		z.MarkTags[i] = markTag.Clone(i)
+		z.MarkTags[i].SetCallback(func(evt TagEvent, tag Tag, interval CharInterval) {
+			log.Printf("Event: %v Mark: %v Interval: %v\n", evt, tag.Index(), interval)
+		})
 	}
 	var markColors []colorful.Color
 	// if fyne.CurrentApp().Settings().ThemeVariant() == theme.VariantDark {
@@ -556,7 +559,7 @@ func (z *Editor) PosToCharPos(pos fyne.Position) CharPos {
 	x := pos.X - z.lineNumberGrid.Size().Width
 	y := pos.Y
 	if z.lineNumberGrid.Visible() && pos.X < z.lineNumberGrid.Size().Width {
-		return CharPos{z.lineOffset + int(y/z.charSize.Height), 0.0, true}
+		return CharPos{z.lineOffset + int(y/z.charSize.Height), 0, true}
 	}
 	row := z.lineOffset + int(y/z.charSize.Height)
 	s := z.GetLineText(row)
@@ -993,7 +996,32 @@ func (z *Editor) CaretOn(blinking bool) {
 	z.Refresh()
 }
 
+// handleCaretEvent emits an event for all tags whose range contains pos1 as long as it doesn't also contain pos2.
+// Tags without callback function are ignored.
+func (z *Editor) handleCaretEvent(evt TagEvent, pos1, pos2 CharPos) {
+	tags, ok := z.Tags.LookupRange(CharInterval{Start: pos1, End: pos1})
+	if ok {
+		for _, tag := range tags {
+			cb := tag.Callback()
+			if cb == nil {
+				continue
+			}
+			if interval, ok := z.Tags.Lookup(tag); ok {
+				if interval.Contains(pos2) {
+					continue
+				}
+				cb(evt, tag, interval)
+			}
+		}
+	}
+}
+
 func (z *Editor) SetCaret(pos CharPos) {
+	// handle caret leave event
+	z.handleCaretEvent(CaretLeaveEvent, z.CaretPos, pos)
+
+	// handle caret itself
+	oldPos := z.CaretPos
 	drawCaret := z.DrawCaret
 	blinking := z.CaretOff()
 	defer func() {
@@ -1002,6 +1030,9 @@ func (z *Editor) SetCaret(pos CharPos) {
 		}
 	}()
 	z.CaretPos = pos
+
+	// handle caret enter event
+	z.handleCaretEvent(CaretEnterEvent, pos, oldPos)
 }
 
 // MoveCaret moves the caret according to the given movement direction, which may be one of
@@ -1015,15 +1046,24 @@ func (z *Editor) MoveCaret(dir CaretMovement) {
 			z.maybeDrawCaret()
 		}
 	}()
+	oldPos := z.CaretPos
+	defer func(oldPos CharPos) {
+		z.handleCaretEvent(CaretEnterEvent, z.CaretPos, oldPos)
+	}(oldPos)
+	var newPos CharPos
 	switch dir {
 	case CaretDown:
-		z.CaretPos = CharPos{Line: min(z.CaretPos.Line+1, len(z.Rows)-1), Column: z.CaretPos.Column}
+		newPos = CharPos{Line: min(z.CaretPos.Line+1, len(z.Rows)-1), Column: z.CaretPos.Column}
+		z.handleCaretEvent(CaretLeaveEvent, oldPos, newPos)
+		z.CaretPos = newPos
 		if z.CaretPos.Line == z.lineOffset+z.Lines {
 			z.ScrollDown()
 			return
 		}
 	case CaretUp:
-		z.CaretPos = CharPos{Line: max(z.CaretPos.Line-1, 0), Column: z.CaretPos.Column}
+		newPos = CharPos{Line: max(z.CaretPos.Line-1, 0), Column: z.CaretPos.Column}
+		z.handleCaretEvent(CaretLeaveEvent, oldPos, newPos)
+		z.CaretPos = newPos
 		if z.CaretPos.Line == z.lineOffset-1 {
 			z.ScrollUp()
 			return
@@ -1034,13 +1074,17 @@ func (z *Editor) MoveCaret(dir CaretMovement) {
 				return
 			}
 			z.MoveCaret(CaretUp)
-			z.CaretPos = CharPos{Line: z.CaretPos.Line, Column: len(z.Rows[z.CaretPos.Line]) - 1}
+			newPos = CharPos{Line: z.CaretPos.Line, Column: len(z.Rows[z.CaretPos.Line]) - 1}
+			z.handleCaretEvent(CaretLeaveEvent, oldPos, newPos)
+			z.CaretPos = newPos
 			if z.CaretPos.Column > z.columnOffset+z.Columns {
 				z.columnOffset = z.CaretPos.Column - z.Columns/2
 			}
 			return
 		}
-		z.CaretPos = CharPos{Line: z.CaretPos.Line, Column: z.CaretPos.Column - 1}
+		newPos = CharPos{Line: z.CaretPos.Line, Column: z.CaretPos.Column - 1}
+		z.handleCaretEvent(CaretLeaveEvent, oldPos, newPos)
+		z.CaretPos = newPos
 		if z.CaretPos.Column < z.columnOffset {
 			z.ScrollLeft(z.Columns / 2)
 		}
@@ -1051,48 +1095,66 @@ func (z *Editor) MoveCaret(dir CaretMovement) {
 			z.MoveCaret(CaretDown)
 			return
 		}
-		z.CaretPos = CharPos{Line: z.CaretPos.Line, Column: z.CaretPos.Column + 1}
+		newPos = CharPos{Line: z.CaretPos.Line, Column: z.CaretPos.Column + 1}
+		z.handleCaretEvent(CaretLeaveEvent, oldPos, newPos)
+		z.CaretPos = newPos
 		if z.CaretPos.Column >= z.columnOffset+z.Columns {
 			z.ScrollRight(z.Columns / 2)
 		}
 	case CaretHome:
-		z.CaretPos = CharPos{Line: 0, Column: 0}
+		newPos = CharPos{Line: 0, Column: 0}
+		z.handleCaretEvent(CaretLeaveEvent, oldPos, newPos)
+		z.CaretPos = newPos
 		z.SetTopLine(0)
 	case CaretEnd:
 		newTop := z.LastLine() - z.Lines + 1
 		z.SetTopLine(newTop)
-		z.CaretPos = CharPos{Line: z.LastLine(), Column: z.LastColumn(z.LastLine())}
+		newPos = CharPos{Line: z.LastLine(), Column: z.LastColumn(z.LastLine())}
+		z.handleCaretEvent(CaretLeaveEvent, oldPos, newPos)
+		z.CaretPos = newPos
 	case CaretLineStart:
-		z.CaretPos = CharPos{Line: z.CaretPos.Line, Column: 0}
+		newPos = CharPos{Line: z.CaretPos.Line, Column: 0}
 		if z.columnOffset > 0 {
 			z.columnOffset = 0
 		}
+		z.handleCaretEvent(CaretLeaveEvent, oldPos, newPos)
+		z.CaretPos = newPos
 	case CaretLineEnd:
-		z.CaretPos = CharPos{Line: z.CaretPos.Line, Column: z.LastColumn(z.CaretPos.Line)}
+		newPos = CharPos{Line: z.CaretPos.Line, Column: z.LastColumn(z.CaretPos.Line)}
+		z.handleCaretEvent(CaretLeaveEvent, oldPos, newPos)
+		z.CaretPos = newPos
 		if z.CaretPos.Column >= z.columnOffset+z.Columns {
 			z.ScrollRight(z.Columns / 2)
 		}
 	case CaretHalfPageDown:
 		newLine := min(z.LastLine(), z.CaretPos.Line+z.Lines/2)
-		z.CaretPos = CharPos{Line: newLine, Column: z.CaretPos.Column}
+		newPos = CharPos{Line: newLine, Column: z.CaretPos.Column}
+		z.handleCaretEvent(CaretLeaveEvent, oldPos, newPos)
+		z.CaretPos = newPos
 		if newLine > z.lineOffset+z.Lines-1 {
 			z.CenterLineOnCaret()
 		}
 	case CaretHalfPageUp:
 		newLine := max(0, z.CaretPos.Line-z.Lines/2)
-		z.CaretPos = CharPos{Line: newLine, Column: z.CaretPos.Column}
+		newPos = CharPos{Line: newLine, Column: z.CaretPos.Column}
+		z.handleCaretEvent(CaretLeaveEvent, oldPos, newPos)
+		z.CaretPos = newPos
 		if newLine < z.lineOffset {
 			z.CenterLineOnCaret()
 		}
 	case CaretPageDown:
 		newLine := min(z.LastLine(), z.CaretPos.Line+z.Lines)
-		z.CaretPos = CharPos{Line: newLine, Column: z.CaretPos.Column}
+		newPos = CharPos{Line: newLine, Column: z.CaretPos.Column}
+		z.handleCaretEvent(CaretLeaveEvent, oldPos, newPos)
+		z.CaretPos = newPos
 		if newLine > z.lineOffset+z.Lines-1 {
 			z.CenterLineOnCaret()
 		}
 	case CaretPageUp:
 		newLine := max(0, z.CaretPos.Line-z.Lines)
-		z.CaretPos = CharPos{Line: newLine, Column: z.CaretPos.Column}
+		newPos = CharPos{Line: newLine, Column: z.CaretPos.Column}
+		z.handleCaretEvent(CaretLeaveEvent, oldPos, newPos)
+		z.CaretPos = newPos
 		if newLine < z.lineOffset {
 			z.CenterLineOnCaret()
 		}
@@ -1132,8 +1194,7 @@ func (z *Editor) Insert(r []rune, pos CharPos) {
 	rows[k] = newLine
 
 	// adjust tags
-	lastPos := CharPos{Line: len(z.Rows) - 1, Column: len(z.Rows[len(z.Rows)-1]) - 1}
-	tags, ok := z.Tags.LookupRange(CharInterval{Start: pos, End: lastPos})
+	tags, ok := z.Tags.LookupRange(z.ToEnd(pos))
 	if ok {
 		for _, tag := range tags {
 			if tag == nil {
@@ -1222,9 +1283,7 @@ func (z *Editor) Delete(fromTo CharInterval) {
 	z.RemoveSelection()
 
 	// We look up the tags starting at or after the deletion start position.
-	pos := fromTo.Start
-	lastPos := CharPos{Line: len(z.Rows) - 1, Column: len(z.Rows[len(z.Rows)-1]) - 1}
-	tags, ok := z.Tags.LookupRange(CharInterval{Start: pos, End: lastPos})
+	tags, ok := z.Tags.LookupRange(z.ToEnd(fromTo.Start))
 	if !ok {
 		log.Println("NO TAG FOUND")
 	}
@@ -1296,8 +1355,7 @@ func (z *Editor) Delete(fromTo CharInterval) {
 	for i := range rows {
 		rows[i] = z.Rows[i+paraStart]
 	}
-	lastPos = CharPos{Line: len(z.Rows) - 1, Column: len(z.Rows[len(z.Rows)-1]) - 1}
-	tags, ok = z.Tags.LookupRange(CharInterval{Start: pos, End: lastPos})
+	tags, ok = z.Tags.LookupRange(z.ToEnd(fromTo.Start))
 	// newCursorRow := z.CaretPos.Line
 	// newCursorCol := z.CaretPos.Column
 	// rows, newCursorRow, newCursorCol = z.WordWrapRows(rows, z.Columns, z.SoftWrap, z.HardLF,
@@ -1321,6 +1379,16 @@ func (z *Editor) Delete(fromTo CharInterval) {
 	// z.adjustTagLines(tags, lineDelta, pos)
 	//z.SetCaret(CharPos{Line: newCursorRow + paraStart, Column: min(newCursorCol, len(z.Rows[newCursorRow+paraStart])-1)})
 	z.Refresh()
+}
+
+// ToEnd returns the char interval from the given position to the last char of the buffer.
+func (z *Editor) ToEnd(start CharPos) CharInterval {
+	return CharInterval{Start: start, End: z.LastPos()}
+}
+
+// LastPos returns the last char position in the buffer.
+func (z *Editor) LastPos() CharPos {
+	return CharPos{Line: len(z.Rows) - 1, Column: len(z.Rows[len(z.Rows)-1]) - 1}
 }
 
 // PrevPos returns the previous char position in the grid and true, or 0, 0 and false if at home position.

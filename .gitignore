@@ -24,3 +24,6 @@ go.work
 *.go~
 *.mod~
 *.lisp~
+
+# Don't version check obsolete stuff:
+obsolete/
