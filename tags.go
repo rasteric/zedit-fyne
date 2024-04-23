@@ -27,13 +27,16 @@ type Tag interface {
 	Clone(newIndex int) Tag // clone the tag, giving it a new index
 	Callback() TagFunc      // called when TagEvents happen
 	SetCallback(cb TagFunc) // set the callback function
+	UserData() any          // optional payload
+	SetUserData(data any)   // set optional payload
 }
 
-// SimpleTag is the default implementation of a Tag.
-type SimpleTag struct {
-	name  string
-	index int
-	cb    TagFunc
+// StandardTag is the default implementation of a Tag.
+type StandardTag struct {
+	name    string
+	index   int
+	cb      TagFunc
+	payload any
 }
 
 type TagStyleFunc func(tag Tag, c widget.TextGridCell) widget.TextGridCell
@@ -44,28 +47,40 @@ type TagStyler struct {
 	DrawFullLine bool
 }
 
-func NewTag(name string) *SimpleTag {
-	return &SimpleTag{name: name}
+func NewTag(name string) *StandardTag {
+	return &StandardTag{name: name}
 }
 
-func (s *SimpleTag) Name() string {
+func NewTagWithUserData(name string, index int, userData any) *StandardTag {
+	return &StandardTag{name: name, index: index, payload: userData}
+}
+
+func (s *StandardTag) Name() string {
 	return s.name
 }
 
-func (s *SimpleTag) Index() int {
+func (s *StandardTag) Index() int {
 	return s.index
 }
 
-func (s *SimpleTag) Callback() TagFunc {
+func (s *StandardTag) Callback() TagFunc {
 	return s.cb
 }
 
-func (s *SimpleTag) SetCallback(cb TagFunc) {
+func (s *StandardTag) SetCallback(cb TagFunc) {
 	s.cb = cb
 }
 
-func (s *SimpleTag) Clone(newIndex int) Tag {
-	return &SimpleTag{name: s.name, index: newIndex, cb: s.cb}
+func (s *StandardTag) Clone(newIndex int) Tag {
+	return &StandardTag{name: s.name, index: newIndex, cb: s.cb}
+}
+
+func (s *StandardTag) UserData() any {
+	return s.payload
+}
+
+func (s *StandardTag) SetUserData(data any) {
+	s.payload = data
 }
 
 type TagContainer struct {
@@ -138,6 +153,21 @@ func (t *TagContainer) Delete(tag Tag) bool {
 		}
 	}
 	return ok
+}
+
+func (t *TagContainer) DeleteByName(name string) bool {
+	set, ok := t.TagsByName(name)
+	if !ok {
+		return false
+	}
+	tags := set.Values()
+	if tags == nil || len(tags) == 0 {
+		return false
+	}
+	for _, tag := range tags {
+		t.Delete(tag)
+	}
+	return true
 }
 
 func (t *TagContainer) Upsert(tag Tag, interval CharInterval) {
