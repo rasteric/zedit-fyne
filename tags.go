@@ -83,14 +83,16 @@ func (s *StandardTag) SetUserData(data any) {
 	s.payload = data
 }
 
+// TagContainer is a container for holding tags and associating them with char intervals. The data structure
+// is generally threadsafe but some methods can have race conditions and are documented as such.
 type TagContainer struct {
-	tags    map[Tag]CharInterval
-	lookup  *interval.MultiValueSearchTree[Tag, CharPos]
-	stylers []TagStyler
-	names   map[string]*orderedset.OrderedSet[Tag]
-	mutex   sync.Mutex
+	tags   map[Tag]CharInterval
+	lookup *interval.MultiValueSearchTree[Tag, CharPos]
+	names  map[string]*orderedset.OrderedSet[Tag]
+	mutex  sync.Mutex
 }
 
+// NewTagContainer returns a new empty tag container.
 func NewTagContainer() *TagContainer {
 	c := TagContainer{}
 	c.tags = make(map[Tag]CharInterval)
@@ -99,12 +101,23 @@ func NewTagContainer() *TagContainer {
 	return &c
 }
 
+// Clear deletes all tags in the container but retains stylers.
+func (t *TagContainer) Clear() {
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
+	clear(t.tags)
+	clear(t.names)
+	t.lookup = interval.NewMultiValueSearchTreeWithOptions[Tag, CharPos](CmpPos, interval.TreeWithIntervalPoint())
+}
+
+// LookupRange returns the tags intersecting with the given char interval.
 func (t *TagContainer) LookupRange(interval CharInterval) ([]Tag, bool) {
 	t.mutex.Lock()
 	defer t.mutex.Unlock()
 	return t.lookup.AllIntersections(interval.Start, interval.End)
 }
 
+// Lookup returns the char interval associated with the given tag.
 func (t *TagContainer) Lookup(tag Tag) (CharInterval, bool) {
 	t.mutex.Lock()
 	defer t.mutex.Unlock()
@@ -112,6 +125,7 @@ func (t *TagContainer) Lookup(tag Tag) (CharInterval, bool) {
 	return interval, ok
 }
 
+// Add adds a number of tags and associates them with the given interval.
 func (t *TagContainer) Add(interval CharInterval, tags ...Tag) {
 	t.mutex.Lock()
 	defer t.mutex.Unlock()
@@ -129,6 +143,7 @@ func (t *TagContainer) Add(interval CharInterval, tags ...Tag) {
 	t.lookup.Insert(interval.Start, interval.End, tags...)
 }
 
+// Delete deletes the given tag, returns true if the tag was deleted, false if there was no such tag.
 func (t *TagContainer) Delete(tag Tag) bool {
 	t.mutex.Lock()
 	defer t.mutex.Unlock()
@@ -155,6 +170,9 @@ func (t *TagContainer) Delete(tag Tag) bool {
 	return ok
 }
 
+// DeleteByName deletes all tags with the given name. This method does not guarantee that
+// tags that are added concurrently while it is executed are deleted. They may or may not be deleted.
+// So, the method is not protected against race conditions. It is generally thread-safe, however.
 func (t *TagContainer) DeleteByName(name string) bool {
 	set, ok := t.TagsByName(name)
 	if !ok {
@@ -170,6 +188,7 @@ func (t *TagContainer) DeleteByName(name string) bool {
 	return true
 }
 
+// Upsert changes the interval associated with the given tag.
 func (t *TagContainer) Upsert(tag Tag, interval CharInterval) {
 	t.mutex.Lock()
 	defer t.mutex.Unlock()
@@ -239,30 +258,43 @@ func (t *TagContainer) CloneTag(tag Tag) Tag {
 	return tag
 }
 
-func (t *TagContainer) AddStyler(styler TagStyler) {
-	t.mutex.Lock()
-	defer t.mutex.Unlock()
-	if t.stylers == nil {
-		t.stylers = make([]TagStyler, 1)
-		t.stylers[0] = styler
-		return
-	}
-	t.stylers = append(t.stylers, styler)
+// StyleContainer holds a number of tag stylers. The data structure is threadsafe.
+type StyleContainer struct {
+	stylers []TagStyler
+	mutex   sync.Mutex
 }
 
-func (t *TagContainer) RemoveStyler(tag Tag) {
-	t.mutex.Lock()
-	defer t.mutex.Unlock()
-	if t.stylers == nil {
+func NewStyleContainer() *StyleContainer {
+	return &StyleContainer{}
+}
+
+// AddStyler adds a new tag styler to the style container.
+func (c *StyleContainer) AddStyler(styler TagStyler) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	if c.stylers == nil {
+		c.stylers = make([]TagStyler, 1)
+		c.stylers[0] = styler
 		return
 	}
-	t.stylers = slices.DeleteFunc(t.stylers, func(styler TagStyler) bool {
+	c.stylers = append(c.stylers, styler)
+}
+
+// RemoveStyler removes a tag styler from the container.
+func (c *StyleContainer) RemoveStyler(tag Tag) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	if c.stylers == nil {
+		return
+	}
+	c.stylers = slices.DeleteFunc(c.stylers, func(styler TagStyler) bool {
 		return styler.TagName == tag.Name()
 	})
 }
 
-func (t *TagContainer) Stylers() []TagStyler {
-	t.mutex.Lock()
-	defer t.mutex.Unlock()
-	return t.stylers
+// Stylers returns all tag stylers.
+func (c *StyleContainer) Stylers() []TagStyler {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	return c.stylers
 }

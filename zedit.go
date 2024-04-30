@@ -46,35 +46,36 @@ const (
 // break in the future.
 type Editor struct {
 	widget.BaseWidget
-	Rows                [][]rune      // the text
-	Tags                *TagContainer // all tags
-	SelectionTag        Tag           // for the selected text (should use the default style provided by operating system)
-	SelectionStyleFunc  TagStyleFunc  // style func for the selection
-	HighlightTag        Tag           // for trasnient highlighting (usually has a different style than selection)
-	HighlightStyleFunc  TagStyleFunc  // style func for highlight
-	MarkTags            []Tag         // a number of pre-configured tags used for marking text (default: 0..9 tags)
-	MarkStyleFunc       TagStyleFunc  // mark style func, using the tag index to distinguish marks
-	ErrorTag            Tag           // for errors
-	ParenErrorTag       Tag           // for wrong right parenthesis
-	ErrorStyleFunc      TagStyleFunc  // style of errors (default: theme error color)
-	Lines               int           // the number of lines displayed
-	Columns             int           // the number of columns displayed
-	ShowLineNumbers     bool          // switches on or off the line number display, which is in a separate grid
-	ShowWhitespace      bool          // show special glyphs for line endings (currently defunct)
-	BlendFG             BlendMode     // how layers of color are blended/composited for text foreground
-	BlendFGSwitched     bool          // whether to switch the colors while blending forground (sometimes makes a difference)
-	BlendBG             BlendMode     // how layers of color are blended for background
-	BlendBGSwitched     bool          // whether the colors are switched while blending background colors (sometimes makes a difference)
-	HardLF              rune          // hard line feed character
-	SoftLF              rune          // soft line feed character (subject to word-wrapping and deletion in text)
-	ScrollFactor        float32       // speed of scrolling
-	TabWidth            int           // If set to 0 the fyne.DefaultTabWidth is used
-	MinRefreshInterval  time.Duration // minimum interval in ms to refresh display
-	CharDrift           float32       // default 0.4, added to calculation per char when finding char position from x-position
-	LineWrap            bool          // automatically wrap lines (default: true)
-	SoftWrap            bool          // soft wrap lines, if not true wrapping inserst hard line feeds (default: true)
-	HighlightParens     bool          // highlight parentheses and quotation marks (default: true)
-	HighlightParenRange bool          // highlight the whole range between matching parens (default: false)
+	Rows                [][]rune        // the text
+	Tags                *TagContainer   // all tags
+	Styles              *StyleContainer // styles associated with tags
+	SelectionTag        Tag             // for the selected text (should use the default style provided by operating system)
+	SelectionStyleFunc  TagStyleFunc    // style func for the selection
+	HighlightTag        Tag             // for trasnient highlighting (usually has a different style than selection)
+	HighlightStyleFunc  TagStyleFunc    // style func for highlight
+	MarkTags            []Tag           // a number of pre-configured tags used for marking text (default: 0..9 tags)
+	MarkStyleFunc       TagStyleFunc    // mark style func, using the tag index to distinguish marks
+	ErrorTag            Tag             // for errors
+	ParenErrorTag       Tag             // for wrong right parenthesis
+	ErrorStyleFunc      TagStyleFunc    // style of errors (default: theme error color)
+	Lines               int             // the number of lines displayed
+	Columns             int             // the number of columns displayed
+	ShowLineNumbers     bool            // switches on or off the line number display, which is in a separate grid
+	ShowWhitespace      bool            // show special glyphs for line endings (currently defunct)
+	BlendFG             BlendMode       // how layers of color are blended/composited for text foreground
+	BlendFGSwitched     bool            // whether to switch the colors while blending forground (sometimes makes a difference)
+	BlendBG             BlendMode       // how layers of color are blended for background
+	BlendBGSwitched     bool            // whether the colors are switched while blending background colors (sometimes makes a difference)
+	HardLF              rune            // hard line feed character
+	SoftLF              rune            // soft line feed character (subject to word-wrapping and deletion in text)
+	ScrollFactor        float32         // speed of scrolling
+	TabWidth            int             // If set to 0 the fyne.DefaultTabWidth is used
+	MinRefreshInterval  time.Duration   // minimum interval in ms to refresh display
+	CharDrift           float32         // default 0.4, added to calculation per char when finding char position from x-position
+	LineWrap            bool            // automatically wrap lines (default: true)
+	SoftWrap            bool            // soft wrap lines, if not true wrapping inserst hard line feeds (default: true)
+	HighlightParens     bool            // highlight parentheses and quotation marks (default: true)
+	HighlightParenRange bool            // highlight the whole range between matching parens (default: false)
 	// text cursor
 	DrawCaret        bool          // if true, the caret is drawn, if false, the caret is handled but not drawn
 	CaretBlinkDelay  time.Duration // period after last interaction before caret starts blinking
@@ -121,6 +122,7 @@ func NewEditor(columns, lines int, c fyne.Canvas) *Editor {
 	fgcolor := theme.BackgroundColor()
 
 	z := Editor{Lines: lines, Columns: columns + 1, grid: widget.NewTextGrid()}
+	z.Styles = NewStyleContainer()
 	z.HighlightParens = true
 	z.BlendFG = BlendOverlay
 	z.BlendBG = BlendOverlay
@@ -222,9 +224,12 @@ func NewEditor(columns, lines int, c fyne.Canvas) *Editor {
 	z.border = container.NewBorder(nil, nil, z.lineNumberGrid, z.scroll, z.grid)
 	z.content = container.New(layout.NewStackLayout(), z.background, z.border)
 	// selection styler
-	z.Tags.AddStyler(TagStyler{TagName: z.SelectionTag.Name(), StyleFunc: z.SelectionStyleFunc, DrawFullLine: true})
-	z.Tags.AddStyler(TagStyler{TagName: z.HighlightTag.Name(), StyleFunc: z.HighlightStyleFunc, DrawFullLine: true})
-	z.Tags.AddStyler(TagStyler{TagName: z.ErrorTag.Name(), StyleFunc: z.ErrorStyleFunc, DrawFullLine: false})
+	z.Styles.AddStyler(TagStyler{TagName: z.SelectionTag.Name(),
+		StyleFunc: z.SelectionStyleFunc, DrawFullLine: true})
+	z.Styles.AddStyler(TagStyler{TagName: z.HighlightTag.Name(),
+		StyleFunc: z.HighlightStyleFunc, DrawFullLine: true})
+	z.Styles.AddStyler(TagStyler{TagName: z.ErrorTag.Name(),
+		StyleFunc: z.ErrorStyleFunc, DrawFullLine: false})
 	// mark color and style
 	z.MarkTags = make([]Tag, 10)
 	markTag := NewTag("mark")
@@ -255,7 +260,7 @@ func NewEditor(columns, lines int, c fyne.Canvas) *Editor {
 			Style: selStyle,
 		}
 	})
-	z.Tags.AddStyler(TagStyler{TagName: markTag.Name(), StyleFunc: markStyler, DrawFullLine: true})
+	z.Styles.AddStyler(TagStyler{TagName: markTag.Name(), StyleFunc: markStyler, DrawFullLine: true})
 	z.SetText(" ")
 	z.BlinkCaret(true)
 	z.addDefaultShortcuts()
@@ -380,7 +385,6 @@ func (z *Editor) Cut() {
 		return
 	}
 	z.Delete(sel)
-	z.RemoveSelection()
 }
 
 // FindParagraphEnd finds the end row of the paragraph in which row is located.
@@ -554,6 +558,20 @@ func (z *Editor) SelectWord(pos CharPos) {
 	z.Refresh()
 }
 
+// Select the given char interval. The interval is sanitized before setting the selection.
+func (z *Editor) Select(fromTo CharInterval) {
+	fromTo = fromTo.Sanitize(z.LastPos())
+	z.Tags.Upsert(z.SelectionTag, fromTo)
+	z.Refresh()
+}
+
+// SelectAll selects all text in the editor.
+func (z *Editor) SelectAll() {
+	fromTo := CharInterval{Start: CharPos{Line: 0, Column: 0}, End: z.LastPos()}
+	z.Tags.Upsert(z.SelectionTag, fromTo)
+	z.Refresh()
+}
+
 // RemoveSelection removes the current selection, both the range returned by GetSelection
 // and its graphical display.
 func (z *Editor) RemoveSelection() {
@@ -617,7 +635,9 @@ func (z *Editor) MinSize() fyne.Size {
 		Height: float32(z.Lines) * z.charSize.Height}
 }
 
+// SetText sets the text in the editor to the given string, removing all tags in the process.
 func (z *Editor) SetText(s string) {
+	z.Tags.Clear()
 	lines := strings.Split(s, "\n")
 	// populate the text grid
 	z.Rows = make([][]rune, len(lines))
@@ -650,6 +670,7 @@ func (z *Editor) TypedKey(evt *fyne.KeyEvent) {
 }
 
 func (z *Editor) TypedShortcut(s fyne.Shortcut) {
+	log.Println(s.ShortcutName())
 	if handler, ok := z.handlers[s.ShortcutName()]; ok {
 		z.lastInteraction = time.Now()
 		handler(z)
@@ -658,6 +679,7 @@ func (z *Editor) TypedShortcut(s fyne.Shortcut) {
 
 // AddhortcutHandler adds a keyboard shortcut to the grid.
 func (z *Editor) AddShortcutHandler(s fyne.KeyboardShortcut, handler func(z *Editor)) {
+	log.Println(s.ShortcutName())
 	z.shortcuts[s.ShortcutName()] = s
 	z.handlers[s.ShortcutName()] = handler
 }
@@ -766,6 +788,10 @@ func (z *Editor) addDefaultShortcuts() {
 	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.Key0, Modifier: fyne.KeyModifierAlt},
 		func(z *Editor) {
 			z.SetMark(0)
+		})
+	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.KeyA, Modifier: fyne.KeyModifierControl},
+		func(z *Editor) {
+			z.SelectAll()
 		})
 }
 
@@ -887,7 +913,7 @@ outer:
 		}
 	}
 
-	stylers := z.Tags.Stylers()
+	stylers := z.Styles.Stylers()
 	if stylers != nil {
 		for i := len(stylers) - 1; i >= 0; i-- {
 			tags, ok := z.Tags.TagsByName(stylers[i].TagName)
@@ -1060,7 +1086,7 @@ func (z *Editor) maybeHighlightParen() {
 	if !ok {
 		return
 	}
-	if !(IsRightParen(r) || r == '"' || r == '\'') {
+	if !(IsRightParen(r) || IsQuotationMark(r)) {
 		return
 	}
 	current, ok := z.PrevPos(pos)
@@ -1079,7 +1105,10 @@ func (z *Editor) maybeHighlightParen() {
 	default:
 		match = r
 	}
-	openParens := 1
+	openParens := 0
+	if IsRightParen(r) {
+		openParens = 1
+	}
 	lpos, ok := z.FindRune(current, true, func(c rune) bool {
 		if IsRightParen(c) {
 			openParens++
@@ -1402,6 +1431,7 @@ func (z *Editor) adjustTagLines(tags []Tag, lineDelta int, insertPos CharPos) {
 // and softLF runes as hard and soft line feed characters.
 func (z *Editor) Delete(fromTo CharInterval) {
 	z.RemoveSelection()
+	fromTo = fromTo.Sanitize(z.LastPos())
 
 	// We look up the tags starting at or after the deletion start position.
 	tags, ok := z.Tags.LookupRange(z.ToEnd(fromTo.Start))
@@ -1978,6 +2008,17 @@ func IsLeftParen(c rune) bool {
 func IsRightParen(c rune) bool {
 	switch c {
 	case ')', ']', '}':
+		return true
+	default:
+		return false
+	}
+}
+
+// IsQuotationMark returns true if the rune is a quotation mark, which behaves similar to a paren
+// but is symmetric (i.e., opening and closing marks are identical).
+func IsQuotationMark(c rune) bool {
+	switch c {
+	case '"', '\'':
 		return true
 	default:
 		return false

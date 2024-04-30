@@ -87,3 +87,15 @@ func (c CharInterval) MaybeSwap() CharInterval {
 	}
 	return c
 }
+
+// Sanitize computes a new interval that is strictly between [(0,0)...lastPos]. This can be used
+// as a helper when intervals might have invalid values (e.g. due to user input). Sanitize calls
+// MaybeSwap.
+func (c CharInterval) Sanitize(lastPos CharPos) CharInterval {
+	r := c.MaybeSwap()
+	r.Start = CharPos{Line: max(r.Start.Line, 0), Column: max(r.Start.Column, 0)}
+	if CmpPos(r.End, lastPos) > 0 {
+		r.End = lastPos
+	}
+	return r
+}
