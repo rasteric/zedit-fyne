@@ -670,21 +670,21 @@ func (z *Editor) TypedKey(evt *fyne.KeyEvent) {
 }
 
 func (z *Editor) TypedShortcut(s fyne.Shortcut) {
-	log.Println(s.ShortcutName())
-	if handler, ok := z.handlers[s.ShortcutName()]; ok {
-		z.lastInteraction = time.Now()
-		handler(z)
+	if ks, ok := s.(fyne.KeyboardShortcut); ok {
+		if handler, ok := z.handlers[GetKeyboardShortcutKey(ks)]; ok {
+			z.lastInteraction = time.Now()
+			handler(z)
+		}
 	}
 }
 
 // AddhortcutHandler adds a keyboard shortcut to the grid.
 func (z *Editor) AddShortcutHandler(s fyne.KeyboardShortcut, handler func(z *Editor)) {
-	log.Println(s.ShortcutName())
-	z.shortcuts[s.ShortcutName()] = s
-	z.handlers[s.ShortcutName()] = handler
+	z.shortcuts[GetKeyboardShortcutKey(s)] = s
+	z.handlers[GetKeyboardShortcutKey(s)] = handler
 }
 
-// RemoveShortcutHandler removes the keyboard shortcut handler with the given name.
+// RemoveShortcutHandler removes the keyboard shortcut handler with the given key.
 func (z *Editor) RemoveShortcutHandler(s string) {
 	delete(z.shortcuts, s)
 	delete(z.handlers, s)
@@ -745,7 +745,7 @@ func (z *Editor) addDefaultShortcuts() {
 		func(z *Editor) {
 			z.MoveCaret(CaretPageUp)
 		})
-	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.KeyX, Modifier: fyne.KeyModifierAlt},
+	z.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.KeyX, Modifier: fyne.KeyModifierControl},
 		func(z *Editor) {
 			z.Cut()
 		})
@@ -2023,4 +2023,11 @@ func IsQuotationMark(c rune) bool {
 	default:
 		return false
 	}
+}
+
+// MakeKeyboardShortcutKey makes a lookup key for a fyne.KeyboardShortcut that is equal
+// for any two shortcuts with the same key and modifier. (The shortcut name does not have this
+// property.)
+func GetKeyboardShortcutKey(s fyne.KeyboardShortcut) string {
+	return fmt.Sprintf("%v:%v", s.Key(), s.Mod())
 }
