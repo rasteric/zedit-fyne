@@ -267,6 +267,12 @@ func NewEditor(columns, lines int, c fyne.Canvas) *Editor {
 	return &z
 }
 
+// adjustScroll adjusts the internal spacer of the scroll bar. This method must be called after each
+// change that might affect the number of rows.
+func (z *Editor) adjustScroll() {
+	z.vSpacer.SetHeight(float32(len(z.Rows)) * z.charSize.Height)
+}
+
 // initInternalGrid initializes the internal grid (z.grid) to all spaces Lines x Columns.
 // This grid is only used for display and may never change! It's like a VRAM fixed character display.
 func (z *Editor) initInternalGrid() {
@@ -640,18 +646,121 @@ func (z *Editor) SetText(s string) {
 	z.Tags.Clear()
 	lines := strings.Split(s, "\n")
 	// populate the text grid
-	z.Rows = make([][]rune, len(lines))
-	for i, line := range lines {
-		if len(line) > z.maxLineLen {
-			z.maxLineLen = len(line)
-		}
+	z.Rows = make([][]rune, 0)
+	for _, line := range lines {
 		r := []rune(line)
 		r = append(r, z.HardLF)
-		z.Rows[i] = r
+		newLines := make([][]rune, 0)
+		if z.LineWrap {
+			newLines = append(newLines, z.wrapLine(r)...)
+		} else {
+			newLines = append(newLines, r)
+		}
+		z.Rows = append(z.Rows, newLines...)
+		if len(z.Rows[len(z.Rows)-1]) > z.maxLineLen {
+			z.maxLineLen = len(z.Rows[len(z.Rows)-1])
+		}
 	}
-
-	z.vSpacer.SetHeight(float32(len(z.Rows)) * z.charSize.Height)
 	z.Refresh()
+}
+
+// wrapLine word wraps a line of runes according to the editor settings for soft wrapping.
+func (z *Editor) wrapLine(r []rune) [][]rune {
+	var b strings.Builder
+	lastGap := 0
+	lineStart := 0
+	i := 0
+	c := 0
+	hasSpace := false
+	lines := make([][]rune, 0)
+	for i = range r {
+		c++
+		if unicode.IsSpace(r[i]) {
+			lastGap = i
+			hasSpace = true
+		}
+		if c >= z.Columns {
+			if !hasSpace {
+				lastGap = i
+			}
+			for j := lineStart; j <= lastGap; j++ {
+				b.WriteRune(r[j])
+			}
+			if z.SoftWrap {
+				b.WriteRune(z.SoftLF)
+			} else {
+				b.WriteRune(z.HardLF)
+			}
+			lines = append(lines, []rune(b.String()))
+			b.Reset()
+			lineStart = lastGap + 1
+			hasSpace = false
+			c = 0
+		}
+	}
+	if lineStart < i {
+		for j := lineStart; j <= i; j++ {
+			b.WriteRune(r[j])
+		}
+		lines = append(lines, []rune(b.String()))
+	}
+	return lines
+}
+
+// PARAGRAPHS
+
+// LineToPara returns the real paragraph number for a given 0-indexed row if there is one,
+// false otherwise. The paragraph number is measured according to the hard LFs
+// from the start of the document. If z.WordWrap is false, this function always
+// returns the line + 1. However, if it is true, this function computes the
+// paragraph number (indexed from 1) at the given line. This function is O(n) in the number of lines.
+func (z *Editor) LineToPara(row int) (int, bool) {
+	if !z.LineWrap {
+		return row + 1, true
+	}
+	if row == 0 {
+		return 1, true
+	}
+	if row > z.LastLine() {
+		return row + 1, false
+	}
+	c := 0
+	for i := 0; i < row; i++ {
+		if z.Rows[i][z.LastColumn(i)] == z.HardLF {
+			c++
+		}
+	}
+	return c + 1, z.Rows[row-1][z.LastColumn(row-1)] == z.HardLF
+}
+
+// ParaToLine returns the 0-indexed line number at which the given 1-index
+// n-th paragraph starts and true if there is a paragraph with that index,
+// 0 and false otherwise. This function is O(n) in the number of lines.
+func (z *Editor) ParaToLine(paraNum int) (int, bool) {
+	n := 0
+	c := 0
+	for i := range z.Rows {
+		if z.Rows[i][z.LastColumn(i)] == z.HardLF {
+			n = i + 1
+			c++
+		}
+		if c == paraNum-1 {
+			return n, true
+		}
+	}
+	return 0, false
+}
+
+// ParaCount counts the number of paragraphs, which is equivalent to the number of lines
+// ending in HardLF + 1.
+func (z *Editor) ParaCount() int {
+	c := 0
+	for i := range z.Rows {
+		if z.Rows[i][z.LastColumn(i)] == z.HardLF {
+			c++
+		}
+	}
+	return c
 }
 
 // KEY HANDLING
@@ -901,10 +1010,10 @@ outer:
 		fmtStr := "%" + ll + "d "
 		c := z.lineOffset
 		for i := 0; i < z.Lines; i++ {
-			c++
-			s := []rune(fmt.Sprintf(fmtStr, c))
+			lino, ok := z.LineToPara(z.lineOffset + i)
+			s := []rune(fmt.Sprintf(fmtStr, lino))
 			for j := 0; j < len(s); j++ {
-				if c-1 <= z.LastLine() {
+				if ok && c-1 <= z.LastLine() {
 					z.lineNumberGrid.SetCell(i, j, widget.TextGridCell{Rune: s[j], Style: z.lineNumberStyle})
 				} else {
 					z.lineNumberGrid.SetCell(i, j, widget.TextGridCell{Rune: ' ', Style: z.lineNumberStyle})
@@ -934,6 +1043,7 @@ outer:
 			}
 		}
 	}
+	z.adjustScroll()
 	z.lineNumberGrid.Refresh()
 	z.grid.Refresh()
 }

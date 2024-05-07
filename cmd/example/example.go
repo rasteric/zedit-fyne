@@ -16,14 +16,16 @@ func main() {
 	ed.AddEmacsShortcuts()
 	s := ""
 	for i := 0; i < 100; i++ {
-		s += lorem.Sentence(5, 15)
+		s += lorem.Sentence(5, 30)
 		s += "\n"
 	}
 	s = s[:len(s)-1]
 	ed.SetText(s)
 	w.SetContent(ed)
-	w.Canvas().Focus(ed)
-	// w.Resize(fyne.NewSize(480, 360))
-
+	li, _ := ed.ParaToLine(10)
+	li2 := ed.FindParagraphEnd(li, ed.HardLF)
+	ed.Select(zedit.CharInterval{Start: zedit.CharPos{Line: li, Column: 0},
+		End: zedit.CharPos{Line: li2, Column: ed.LastColumn(li2)}})
+	ed.Focus()
 	w.ShowAndRun()
 }
