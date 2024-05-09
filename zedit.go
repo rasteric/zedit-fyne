@@ -40,89 +40,43 @@ const (
 	CaretPageUp
 )
 
-// Editor is the main editor widget. Even though some of its properties are public, this is merely
-// for convenience and it's best to only modify it using methods. If there is no method for some
-// operation, chances are high that direct manipulation of internals such as editor.Rows might
-// break in the future.
-type Editor struct {
-	widget.BaseWidget
-	Rows                [][]rune        // the text
-	Tags                *TagContainer   // all tags
-	Styles              *StyleContainer // styles associated with tags
-	SelectionTag        Tag             // for the selected text (should use the default style provided by operating system)
-	SelectionStyleFunc  TagStyleFunc    // style func for the selection
-	HighlightTag        Tag             // for trasnient highlighting (usually has a different style than selection)
-	HighlightStyleFunc  TagStyleFunc    // style func for highlight
-	MarkTags            []Tag           // a number of pre-configured tags used for marking text (default: 0..9 tags)
-	MarkStyleFunc       TagStyleFunc    // mark style func, using the tag index to distinguish marks
-	ErrorTag            Tag             // for errors
-	ParenErrorTag       Tag             // for wrong right parenthesis
-	ErrorStyleFunc      TagStyleFunc    // style of errors (default: theme error color)
-	Lines               int             // the number of lines displayed
-	Columns             int             // the number of columns displayed
-	ShowLineNumbers     bool            // switches on or off the line number display, which is in a separate grid
-	ShowWhitespace      bool            // show special glyphs for line endings (currently defunct)
-	BlendFG             BlendMode       // how layers of color are blended/composited for text foreground
-	BlendFGSwitched     bool            // whether to switch the colors while blending forground (sometimes makes a difference)
-	BlendBG             BlendMode       // how layers of color are blended for background
-	BlendBGSwitched     bool            // whether the colors are switched while blending background colors (sometimes makes a difference)
-	HardLF              rune            // hard line feed character
-	SoftLF              rune            // soft line feed character (subject to word-wrapping and deletion in text)
-	ScrollFactor        float32         // speed of scrolling
-	TabWidth            int             // If set to 0 the fyne.DefaultTabWidth is used
-	MinRefreshInterval  time.Duration   // minimum interval in ms to refresh display
-	CharDrift           float32         // default 0.4, added to calculation per char when finding char position from x-position
-	LineWrap            bool            // automatically wrap lines (default: true)
-	SoftWrap            bool            // soft wrap lines, if not true wrapping inserst hard line feeds (default: true)
-	HighlightParens     bool            // highlight parentheses and quotation marks (default: true)
-	HighlightParenRange bool            // highlight the whole range between matching parens (default: false)
-	// text cursor
-	DrawCaret        bool          // if true, the caret is drawn, if false, the caret is handled but not drawn
-	CaretBlinkDelay  time.Duration // period after last interaction before caret starts blinking
-	CaretOnDuration  time.Duration // how long the caret is shown when blinking
-	CaretOffDuration time.Duration // how long a blinking caret is off
-	CaretPos         CharPos       // the position of the caret, read-only; should be set with SetCaretPos
-	caretState       uint32
-	hasCaretBlinking uint32
-	caretBlinkCancel func()
-
-	// internal fields
-	grid                 *widget.TextGrid
-	scroll               *container.Scroll
-	lineOffset           int
-	columnOffset         int
-	charSize             fyne.Size
-	border               *fyne.Container
-	lastInteraction      time.Time
-	defaultStyle         EditorStyle
-	invertedDefaultStyle EditorStyle
-	lineNumberStyle      EditorStyle
-	lineNumberGrid       *widget.TextGrid
-	vSpacer              *FixedSpacer
-	maxLineLen           int
-	hasFocus             bool
-	background           *canvas.Rectangle
-	content              *fyne.Container
-	selStart             *CharPos
-	selEnd               *CharPos
-	shortcuts            map[string]fyne.KeyboardShortcut
-	handlers             map[string]func(z *Editor)
-	keyHandlers          map[fyne.KeyName]func(z *Editor)
-	canvas               fyne.Canvas
-	// delayed refresh
-	refresher     func()
-	lastRefreshed time.Time
-	// synchronization
-	mutex sync.RWMutex
+// Config stores configuration information for an editor.
+type Config struct {
+	SelectionTag        Tag           // the tag used for marking selection ranges
+	SelectionStyleFunc  TagStyleFunc  // style of the selection tag
+	HighlightTag        Tag           // for trasnient highlighting (usually has a different style than selection)
+	HighlightStyleFunc  TagStyleFunc  // style func for highlight
+	MarkTag             Tag           // template for the mark tags
+	MarkTags            []Tag         // a number of pre-configured tags used for marking text (default: 0..9 tags)
+	MarkStyleFunc       TagStyleFunc  // mark style func, using the tag index to distinguish marks
+	ErrorTag            Tag           // for errors
+	ParenErrorTag       Tag           // for wrong right parenthesis
+	ErrorStyleFunc      TagStyleFunc  // style of errors (default: theme error color)
+	ShowLineNumbers     bool          // switches on or off the line number display, which is in a separate grid
+	ShowWhitespace      bool          // show special glyphs for line endings (currently defunct)
+	BlendFG             BlendMode     // how layers of color are blended/composited for text foreground
+	BlendFGSwitched     bool          // whether to switch the colors while blending forground (sometimes makes a difference)
+	BlendBG             BlendMode     // how layers of color are blended for background
+	BlendBGSwitched     bool          // whether the colors are switched while blending background colors (sometimes makes a difference)
+	HardLF              rune          // hard line feed character
+	SoftLF              rune          // soft line feed character (subject to word-wrapping and deletion in text)
+	ScrollFactor        float32       // speed of scrolling
+	TabWidth            int           // If set to 0 the fyne.DefaultTabWidth is used
+	MinRefreshInterval  time.Duration // minimum interval in ms to refresh display
+	CharDrift           float32       // default 0.4, added to calculation per char when finding char position from x-position
+	LineWrap            bool          // automatically wrap lines (default: true)
+	SoftWrap            bool          // soft wrap lines, if not true wrapping inserst hard line feeds (default: true)
+	HighlightParens     bool          // highlight parentheses and quotation marks (default: true)
+	HighlightParenRange bool          // highlight the whole range between matching parens (default: false)
+	DrawCaret           bool          // if true, the caret is drawn, if false, the caret is handled but not drawn
+	CaretBlinkDelay     time.Duration // period after last interaction before caret starts blinking
+	CaretOnDuration     time.Duration // how long the caret is shown when blinking
+	CaretOffDuration    time.Duration // how long a blinking caret is off
 }
 
-// Editor is like TextGrid but with an internal vertical scroll bar and an optional line number display.
-func NewEditor(columns, lines int, c fyne.Canvas) *Editor {
-	bgcolor := BlendColors(BlendColor, true, theme.TextColor(), theme.PrimaryColor())
-	fgcolor := theme.BackgroundColor()
-
-	z := Editor{Lines: lines, Columns: columns + 1, grid: widget.NewTextGrid()}
-	z.Styles = NewStyleContainer()
+// NewConfig returns a new config with default values.
+func NewConfig() *Config {
+	z := &Config{}
 	z.HighlightParens = true
 	z.BlendFG = BlendOverlay
 	z.BlendBG = BlendOverlay
@@ -181,26 +135,101 @@ func NewEditor(columns, lines int, c fyne.Canvas) *Editor {
 			Style: selStyle,
 		}
 	})
-	z.canvas = c
 	z.LineWrap = true
 	z.SoftWrap = true
 	z.HardLF = ' '
 	z.SoftLF = '\r'
 	z.CharDrift = 0.4
-	z.grid = widget.NewTextGrid()
-	z.initInternalGrid()
 	z.MinRefreshInterval = 10 * time.Millisecond
-	z.shortcuts = make(map[string]fyne.KeyboardShortcut)
-	z.handlers = make(map[string]func(z *Editor))
-	z.keyHandlers = make(map[fyne.KeyName]func(z *Editor))
 	z.CaretBlinkDelay = 3 * time.Second
 	z.CaretOnDuration = 600 * time.Millisecond
 	z.CaretOffDuration = 200 * time.Millisecond
 	z.DrawCaret = true
+	z.ScrollFactor = 2.0
+	// mark color and style
+	z.MarkTags = make([]Tag, 10)
+	z.MarkTag = NewTag("mark")
+	for i := range z.MarkTags {
+		z.MarkTags[i] = z.MarkTag.Clone(i)
+		z.MarkTags[i].SetCallback(func(evt TagEvent, tag Tag, interval CharInterval) {
+			log.Printf("Event: %v Mark: %v Interval: %v\n", evt, tag.Index(), interval)
+		})
+	}
+	return z
+}
+
+// Editor is the main editor widget. Even though some of its properties are public, this is merely
+// for convenience and it's best to only modify it using methods. If there is no method for some
+// operation, chances are high that direct manipulation of internals such as editor.Rows might
+// break in the future.
+type Editor struct {
+	widget.BaseWidget
+	Lines   int             // the number of lines displayed
+	Columns int             // the number of columns displayed
+	Rows    [][]rune        // the text
+	Tags    *TagContainer   // all tags
+	Styles  *StyleContainer // styles associated with tags
+	Config  *Config         // editor configuration
+
+	// internal fields
+	caretPos             CharPos
+	caretState           uint32
+	hasCaretBlinking     uint32
+	caretBlinkCancel     func()
+	grid                 *widget.TextGrid
+	scroll               *container.Scroll
+	lineOffset           int
+	columnOffset         int
+	charSize             fyne.Size
+	border               *fyne.Container
+	lastInteraction      time.Time
+	defaultStyle         EditorStyle
+	invertedDefaultStyle EditorStyle
+	lineNumberStyle      EditorStyle
+	lineNumberGrid       *widget.TextGrid
+	vSpacer              *FixedSpacer
+	maxLineLen           int
+	hasFocus             bool
+	background           *canvas.Rectangle
+	content              *fyne.Container
+	selStart             *CharPos
+	selEnd               *CharPos
+	shortcuts            map[string]fyne.KeyboardShortcut
+	handlers             map[string]func(z *Editor)
+	keyHandlers          map[fyne.KeyName]func(z *Editor)
+	canvas               fyne.Canvas
+	// delayed refresh
+	refresher     func()
+	lastRefreshed time.Time
+	// synchronization
+	mutex sync.RWMutex
+}
+
+// NewEditor returns a new editor widget with fixed columsn and lines, which is displayed in the given
+// canvas object. The editor has default configuration.
+func NewEditor(columns, lines int, c fyne.Canvas) *Editor {
+	config := NewConfig()
+	return NewEditorWithConfig(columns, lines, c, config)
+}
+
+// NewEditorWithConfig returns a new editor with fixed columns and lines, which is displayed in the given
+// canvas and uses the given configuration. The Config must be obtained by NewConfig() to ensure
+// all defaults are initialized but may be changed before calling this function.
+func NewEditorWithConfig(columns, lines int, c fyne.Canvas, config *Config) *Editor {
+	z := Editor{Lines: lines, Columns: columns + 1, grid: widget.NewTextGrid()}
+	z.Config = config
+	bgcolor := BlendColors(BlendColor, true, theme.TextColor(), theme.PrimaryColor())
+	fgcolor := theme.BackgroundColor()
+	z.Styles = NewStyleContainer()
+	z.canvas = c
+	z.grid = widget.NewTextGrid()
+	z.initInternalGrid()
+	z.shortcuts = make(map[string]fyne.KeyboardShortcut)
+	z.handlers = make(map[string]func(z *Editor))
+	z.keyHandlers = make(map[fyne.KeyName]func(z *Editor))
 	z.lastInteraction = time.Now()
 	z.caretState = 1
 	z.Tags = NewTagContainer()
-	z.ScrollFactor = 2.0
 	_, z.caretBlinkCancel = context.WithCancel(context.Background())
 	z.invertedDefaultStyle = &CustomEditorStyle{FGColor: theme.InputBackgroundColor(), BGColor: theme.ForegroundColor()}
 	z.defaultStyle = &CustomEditorStyle{FGColor: theme.ForegroundColor(), BGColor: theme.InputBackgroundColor()}
@@ -224,21 +253,13 @@ func NewEditor(columns, lines int, c fyne.Canvas) *Editor {
 	z.border = container.NewBorder(nil, nil, z.lineNumberGrid, z.scroll, z.grid)
 	z.content = container.New(layout.NewStackLayout(), z.background, z.border)
 	// selection styler
-	z.Styles.AddStyler(TagStyler{TagName: z.SelectionTag.Name(),
-		StyleFunc: z.SelectionStyleFunc, DrawFullLine: true})
-	z.Styles.AddStyler(TagStyler{TagName: z.HighlightTag.Name(),
-		StyleFunc: z.HighlightStyleFunc, DrawFullLine: true})
-	z.Styles.AddStyler(TagStyler{TagName: z.ErrorTag.Name(),
-		StyleFunc: z.ErrorStyleFunc, DrawFullLine: false})
+	z.Styles.AddStyler(TagStyler{TagName: z.Config.SelectionTag.Name(),
+		StyleFunc: z.Config.SelectionStyleFunc, DrawFullLine: true})
+	z.Styles.AddStyler(TagStyler{TagName: z.Config.HighlightTag.Name(),
+		StyleFunc: z.Config.HighlightStyleFunc, DrawFullLine: true})
+	z.Styles.AddStyler(TagStyler{TagName: z.Config.ErrorTag.Name(),
+		StyleFunc: z.Config.ErrorStyleFunc, DrawFullLine: false})
 	// mark color and style
-	z.MarkTags = make([]Tag, 10)
-	markTag := NewTag("mark")
-	for i := range z.MarkTags {
-		z.MarkTags[i] = markTag.Clone(i)
-		z.MarkTags[i].SetCallback(func(evt TagEvent, tag Tag, interval CharInterval) {
-			log.Printf("Event: %v Mark: %v Interval: %v\n", evt, tag.Index(), interval)
-		})
-	}
 	var markColors []colorful.Color
 	// if fyne.CurrentApp().Settings().ThemeVariant() == theme.VariantDark {
 	//	markColors = colorful.FastWarmPalette(10)
@@ -260,7 +281,7 @@ func NewEditor(columns, lines int, c fyne.Canvas) *Editor {
 			Style: selStyle,
 		}
 	})
-	z.Styles.AddStyler(TagStyler{TagName: markTag.Name(), StyleFunc: markStyler, DrawFullLine: true})
+	z.Styles.AddStyler(TagStyler{TagName: z.Config.MarkTag.Name(), StyleFunc: markStyler, DrawFullLine: true})
 	z.SetText(" ")
 	z.BlinkCaret(true)
 	z.addDefaultShortcuts()
@@ -304,7 +325,7 @@ func (z *Editor) SetTopLine(x int) {
 
 // CenterLineOnCaret adjusts the displayed lines such that the caret is in the center of the grid.
 func (z *Editor) CenterLineOnCaret() {
-	line := z.CaretPos.Line
+	line := z.caretPos.Line
 	z.SetTopLine(min(z.LastLine()-z.Lines+1, max(0, line-z.Lines/2)))
 }
 
@@ -343,29 +364,29 @@ func (z *Editor) SetLine(row int, content []rune) {
 // FindParagraphStart finds the start row of the paragraph in which row is located.
 // If the row is 0, 0 is returned, otherwise this checks for the next line ending with lf and
 // returns the row after it.
-func (grid *Editor) FindParagraphStart(row int, lf rune) int {
+func (z *Editor) FindParagraphStart(row int, lf rune) int {
 	if row <= 0 {
 		return 0
 	}
-	k := len(grid.Rows[row-1])
+	k := len(z.Rows[row-1])
 	if k == 0 {
 		return row
 	}
-	if grid.Rows[row-1][k-1] == lf {
+	if z.Rows[row-1][k-1] == lf {
 		return row
 	}
-	return grid.FindParagraphStart(row-1, lf)
+	return z.FindParagraphStart(row-1, lf)
 }
 
 // Text returns the Editor's text as string. Both soft and hard linefeeds are replaced with rune '\n'.
-func (grid *Editor) Text() string {
+func (z *Editor) Text() string {
 	var sb strings.Builder
-	for i := range grid.Rows {
-		for j := range grid.Rows[i][:len(grid.Rows[i])-1] {
-			sb.WriteRune(grid.Rows[i][j])
+	for i := range z.Rows {
+		for j := range z.Rows[i][:len(z.Rows[i])-1] {
+			sb.WriteRune(z.Rows[i][j])
 		}
-		if i < len(grid.Rows) {
-			if grid.Rows[i][len(grid.Rows[i])-1] == grid.HardLF {
+		if i < len(z.Rows) {
+			if z.Rows[i][len(z.Rows[i])-1] == z.Config.HardLF {
 				sb.WriteRune('\n')
 			} // TODO: Check - Should there be a ' ' with SoftLF? Or should it be dropped? There might be an ambiguity.
 		}
@@ -375,18 +396,18 @@ func (grid *Editor) Text() string {
 
 // SetMark marks a region. The given number must be a valid mark tag index.
 func (z *Editor) SetMark(n int) {
-	sel, hasSelection := z.Tags.Lookup(z.SelectionTag)
+	sel, hasSelection := z.Tags.Lookup(z.Config.SelectionTag)
 	if !hasSelection {
-		sel = CharInterval{Start: z.CaretPos, End: z.CaretPos}
+		sel = CharInterval{Start: z.caretPos, End: z.caretPos}
 	}
-	z.Tags.Add(sel, z.MarkTags[n])
+	z.Tags.Add(sel, z.Config.MarkTags[n])
 	z.RemoveSelection()
 	z.Refresh()
 }
 
 // Cut removes the selection text and corresponding tags.
 func (z *Editor) Cut() {
-	sel, ok := z.Tags.Lookup(z.SelectionTag)
+	sel, ok := z.Tags.Lookup(z.Config.SelectionTag)
 	if !ok {
 		return
 	}
@@ -462,7 +483,7 @@ func (z *Editor) MouseMoved(evt *desktop.MouseEvent) {}
 func (z *Editor) MouseOut() {}
 
 func (z *Editor) Scrolled(evt *fyne.ScrollEvent) {
-	step := z.ScrollFactor * (evt.Scrolled.DY / z.charSize.Height)
+	step := z.Config.ScrollFactor * (evt.Scrolled.DY / z.charSize.Height)
 	z.lineOffset = min(len(z.Rows)-z.Lines/2, max(0, int(float32(z.lineOffset)-step)))
 	z.scroll.Offset = fyne.Position{X: z.scroll.Offset.X, Y: float32(z.lineOffset) * z.charSize.Height}
 	z.scroll.Refresh()
@@ -477,7 +498,7 @@ func (z *Editor) Dragged(evt *fyne.DragEvent) {
 	}
 	z.selEnd = &pos
 	interval := CharInterval{Start: *z.selStart, End: *z.selEnd}.MaybeSwap()
-	z.Tags.Upsert(z.SelectionTag, interval)
+	z.Tags.Upsert(z.Config.SelectionTag, interval)
 	if pos.Line <= z.lineOffset {
 		z.ScrollUp()
 		return
@@ -520,7 +541,7 @@ func (z *Editor) DragEnd() {
 // CurrentSelection returns the CharInterval if there is a non-empty selection marked,
 // an empty CharInterval and false otherwise.
 func (z *Editor) CurrentSelection() (CharInterval, bool) {
-	sel, hasSelection := z.Tags.Lookup(z.SelectionTag)
+	sel, hasSelection := z.Tags.Lookup(z.Config.SelectionTag)
 	if !hasSelection {
 		return CharInterval{}, false
 	}
@@ -560,28 +581,28 @@ func (z *Editor) SelectWord(pos CharPos) {
 	}
 	z.selStart = &CharPos{Line: pos.Line, Column: wStart}
 	z.selEnd = &CharPos{Line: pos.Line, Column: wEnd}
-	z.Tags.Upsert(z.SelectionTag, CharInterval{Start: *z.selStart, End: *z.selEnd})
+	z.Tags.Upsert(z.Config.SelectionTag, CharInterval{Start: *z.selStart, End: *z.selEnd})
 	z.Refresh()
 }
 
 // Select the given char interval. The interval is sanitized before setting the selection.
 func (z *Editor) Select(fromTo CharInterval) {
 	fromTo = fromTo.Sanitize(z.LastPos())
-	z.Tags.Upsert(z.SelectionTag, fromTo)
+	z.Tags.Upsert(z.Config.SelectionTag, fromTo)
 	z.Refresh()
 }
 
 // SelectAll selects all text in the editor.
 func (z *Editor) SelectAll() {
 	fromTo := CharInterval{Start: CharPos{Line: 0, Column: 0}, End: z.LastPos()}
-	z.Tags.Upsert(z.SelectionTag, fromTo)
+	z.Tags.Upsert(z.Config.SelectionTag, fromTo)
 	z.Refresh()
 }
 
 // RemoveSelection removes the current selection, both the range returned by GetSelection
 // and its graphical display.
 func (z *Editor) RemoveSelection() {
-	z.Tags.Delete(z.SelectionTag)
+	z.Tags.Delete(z.Config.SelectionTag)
 	z.selStart = nil
 	z.selEnd = nil
 	z.Refresh()
@@ -619,7 +640,7 @@ func (z *Editor) findCharColumn(s string, x float32) int {
 		if size.Width-offset > x {
 			return max(0, pos-1)
 		}
-		offset = offset + z.CharDrift // TODO CHANGE! ad hoc value
+		offset = offset + z.Config.CharDrift // TODO CHANGE! ad hoc value
 	}
 	return len(s) - 1
 }
@@ -633,7 +654,7 @@ func (z *Editor) GetLineText(row int) string {
 }
 
 func (z *Editor) MinSize() fyne.Size {
-	if !z.ShowLineNumbers {
+	if !z.Config.ShowLineNumbers {
 		return fyne.Size{Width: float32(z.Columns) * z.charSize.Width,
 			Height: float32(z.Lines) * z.charSize.Height}
 	}
@@ -649,9 +670,9 @@ func (z *Editor) SetText(s string) {
 	z.Rows = make([][]rune, 0)
 	for _, line := range lines {
 		r := []rune(line)
-		r = append(r, z.HardLF)
+		r = append(r, z.Config.HardLF)
 		newLines := make([][]rune, 0)
-		if z.LineWrap {
+		if z.Config.LineWrap {
 			newLines = append(newLines, z.wrapLine(r)...)
 		} else {
 			newLines = append(newLines, r)
@@ -686,10 +707,10 @@ func (z *Editor) wrapLine(r []rune) [][]rune {
 			for j := lineStart; j <= lastGap; j++ {
 				b.WriteRune(r[j])
 			}
-			if z.SoftWrap {
-				b.WriteRune(z.SoftLF)
+			if z.Config.SoftWrap {
+				b.WriteRune(z.Config.SoftLF)
 			} else {
-				b.WriteRune(z.HardLF)
+				b.WriteRune(z.Config.HardLF)
 			}
 			lines = append(lines, []rune(b.String()))
 			b.Reset()
@@ -715,7 +736,7 @@ func (z *Editor) wrapLine(r []rune) [][]rune {
 // returns the line + 1. However, if it is true, this function computes the
 // paragraph number (indexed from 1) at the given line. This function is O(n) in the number of lines.
 func (z *Editor) LineToPara(row int) (int, bool) {
-	if !z.LineWrap {
+	if !z.Config.LineWrap {
 		return row + 1, true
 	}
 	if row == 0 {
@@ -726,11 +747,11 @@ func (z *Editor) LineToPara(row int) (int, bool) {
 	}
 	c := 0
 	for i := 0; i < row; i++ {
-		if z.Rows[i][z.LastColumn(i)] == z.HardLF {
+		if z.Rows[i][z.LastColumn(i)] == z.Config.HardLF {
 			c++
 		}
 	}
-	return c + 1, z.Rows[row-1][z.LastColumn(row-1)] == z.HardLF
+	return c + 1, z.Rows[row-1][z.LastColumn(row-1)] == z.Config.HardLF
 }
 
 // ParaToLine returns the 0-indexed line number at which the given 1-index
@@ -740,7 +761,7 @@ func (z *Editor) ParaToLine(paraNum int) (int, bool) {
 	n := 0
 	c := 0
 	for i := range z.Rows {
-		if z.Rows[i][z.LastColumn(i)] == z.HardLF {
+		if z.Rows[i][z.LastColumn(i)] == z.Config.HardLF {
 			n = i + 1
 			c++
 		}
@@ -756,7 +777,7 @@ func (z *Editor) ParaToLine(paraNum int) (int, bool) {
 func (z *Editor) ParaCount() int {
 	c := 0
 	for i := range z.Rows {
-		if z.Rows[i][z.LastColumn(i)] == z.HardLF {
+		if z.Rows[i][z.LastColumn(i)] == z.Config.HardLF {
 			c++
 		}
 	}
@@ -767,7 +788,7 @@ func (z *Editor) ParaCount() int {
 
 func (z *Editor) TypedRune(r rune) {
 	z.lastInteraction = time.Now()
-	z.Insert([]rune{r}, z.CaretPos)
+	z.Insert([]rune{r}, z.caretPos)
 	z.MoveCaret(CaretRight)
 }
 
@@ -948,7 +969,7 @@ func (z *Editor) Refresh() {
 	z.mutex.RLock()
 	last := z.lastRefreshed
 	fn := z.refresher
-	interval := z.MinRefreshInterval
+	interval := z.Config.MinRefreshInterval
 	z.mutex.RUnlock()
 	if time.Now().Sub(last) >= interval {
 		z.mutex.Lock()
@@ -1003,7 +1024,7 @@ outer:
 		}
 	}
 
-	if z.ShowLineNumbers {
+	if z.Config.ShowLineNumbers {
 		z.lineNumberGrid.Hidden = false
 		// add line numbers if necessary
 		ll := strconv.Itoa(z.lineNumberLen())
@@ -1060,15 +1081,15 @@ func (z *Editor) currentViewport() CharInterval {
 
 // drawCaret draws the text cursor if necessary.
 func (z *Editor) maybeDrawCaret() bool {
-	if !z.DrawCaret {
+	if !z.Config.DrawCaret {
 		return false
 	}
-	line := z.CaretPos.Line - z.lineOffset
+	line := z.caretPos.Line - z.lineOffset
 	if line < 0 || line > z.Lines-1 {
 		return false
 	}
 	line = SafePositiveValue(line, len(z.grid.Rows)-1)
-	col := z.CaretPos.Column - z.columnOffset
+	col := z.caretPos.Column - z.columnOffset
 	if col > z.Columns-1 {
 		return false
 	}
@@ -1102,16 +1123,16 @@ func (z *Editor) BlinkCaret(on bool) {
 			case <-ctx.Done():
 				return
 			default:
-				if oddTick && time.Since(z.lastInteraction) > z.CaretBlinkDelay {
+				if oddTick && time.Since(z.lastInteraction) > z.Config.CaretBlinkDelay {
 					atomic.StoreUint32(&z.caretState, 1)
 					oddTick = false
 					z.maybeDrawCaret()
-					time.Sleep(z.CaretOffDuration)
+					time.Sleep(z.Config.CaretOffDuration)
 				} else {
 					atomic.StoreUint32(&z.caretState, 2)
 					oddTick = true
 					z.maybeDrawCaret()
-					time.Sleep(z.CaretOnDuration)
+					time.Sleep(z.Config.CaretOnDuration)
 				}
 			}
 		}
@@ -1129,14 +1150,14 @@ func (z *Editor) CaretOff() bool {
 	blinking := z.HasBlinkingCaret()
 	z.caretBlinkCancel()
 	z.caretState = 0
-	z.DrawCaret = false
+	z.Config.DrawCaret = false
 	z.Refresh()
 	return blinking
 }
 
 // CaretOn switches the caret on again after it has been switched off.
 func (z *Editor) CaretOn(blinking bool) {
-	z.DrawCaret = true
+	z.Config.DrawCaret = true
 	z.caretState = 2
 	z.BlinkCaret(blinking)
 	z.Refresh()
@@ -1164,18 +1185,18 @@ func (z *Editor) handleCaretEvent(evt TagEvent, pos1, pos2 CharPos) {
 
 func (z *Editor) SetCaret(pos CharPos) {
 	// handle caret leave event
-	z.handleCaretEvent(CaretLeaveEvent, z.CaretPos, pos)
+	z.handleCaretEvent(CaretLeaveEvent, z.caretPos, pos)
 
 	// handle caret itself
-	oldPos := z.CaretPos
-	drawCaret := z.DrawCaret
+	oldPos := z.caretPos
+	drawCaret := z.Config.DrawCaret
 	blinking := z.CaretOff()
 	defer func() {
 		if drawCaret {
 			z.CaretOn(blinking)
 		}
 	}()
-	z.CaretPos = pos
+	z.caretPos = pos
 	z.maybeHighlightParen()
 
 	// handle caret enter event
@@ -1183,12 +1204,12 @@ func (z *Editor) SetCaret(pos CharPos) {
 }
 
 func (z *Editor) maybeHighlightParen() {
-	z.Tags.DeleteByName(z.HighlightTag.Name())
-	z.Tags.Delete(z.ParenErrorTag)
-	if !z.HighlightParens {
+	z.Tags.DeleteByName(z.Config.HighlightTag.Name())
+	z.Tags.Delete(z.Config.ParenErrorTag)
+	if !z.Config.HighlightParens {
 		return
 	}
-	pos, ok := z.PrevPos(z.CaretPos)
+	pos, ok := z.PrevPos(z.caretPos)
 	if !ok {
 		return
 	}
@@ -1231,7 +1252,7 @@ func (z *Editor) maybeHighlightParen() {
 		z.MarkErrorParen(CharInterval{Start: pos, End: pos})
 		return
 	}
-	if z.HighlightParenRange {
+	if z.Config.HighlightParenRange {
 		z.Highlight(CharInterval{Start: lpos, End: pos})
 		return
 	}
@@ -1265,7 +1286,7 @@ func (z *Editor) FindRune(pos CharPos, backward bool, searchFunc func(c rune) bo
 // Highlight highlights a char interval using the default highlight tag and style. This method
 // does not remove any previous highlights.
 func (z *Editor) Highlight(interval CharInterval) {
-	tag := z.Tags.CloneTag(z.HighlightTag)
+	tag := z.Tags.CloneTag(z.Config.HighlightTag)
 	z.Tags.Add(interval, tag)
 }
 
@@ -1273,8 +1294,8 @@ func (z *Editor) Highlight(interval CharInterval) {
 // removed. This is a quick and dirty solution. For full syntax coloring, it may be better to use
 // a custom function instead of this one.
 func (z *Editor) MarkErrorParen(interval CharInterval) {
-	z.Tags.Delete(z.ParenErrorTag)
-	z.Tags.Add(interval, z.ParenErrorTag)
+	z.Tags.Delete(z.Config.ParenErrorTag)
+	z.Tags.Add(interval, z.Config.ParenErrorTag)
 }
 
 // CharAt returns the unicode glyph at the given position.
@@ -1297,7 +1318,7 @@ func (z *Editor) CharAt(pos CharPos) (rune, bool) {
 // MoveCaret moves the caret according to the given movement direction, which may be one of
 // CaretUp, CaretDown, CaretLeft, and CaretRight.
 func (z *Editor) MoveCaret(dir CaretMovement) {
-	drawCaret := z.DrawCaret
+	drawCaret := z.Config.DrawCaret
 	blinking := z.CaretOff()
 	defer func() {
 		if drawCaret {
@@ -1306,115 +1327,115 @@ func (z *Editor) MoveCaret(dir CaretMovement) {
 			z.maybeHighlightParen()
 		}
 	}()
-	oldPos := z.CaretPos
+	oldPos := z.caretPos
 	defer func(oldPos CharPos) {
-		z.handleCaretEvent(CaretEnterEvent, z.CaretPos, oldPos)
+		z.handleCaretEvent(CaretEnterEvent, z.caretPos, oldPos)
 	}(oldPos)
 	var newPos CharPos
 	switch dir {
 	case CaretDown:
-		newPos = CharPos{Line: min(z.CaretPos.Line+1, len(z.Rows)-1), Column: z.CaretPos.Column}
+		newPos = CharPos{Line: min(z.caretPos.Line+1, len(z.Rows)-1), Column: z.caretPos.Column}
 		z.handleCaretEvent(CaretLeaveEvent, oldPos, newPos)
-		z.CaretPos = newPos
-		if z.CaretPos.Line == z.lineOffset+z.Lines {
+		z.caretPos = newPos
+		if z.caretPos.Line == z.lineOffset+z.Lines {
 			z.ScrollDown()
 			return
 		}
 	case CaretUp:
-		newPos = CharPos{Line: max(z.CaretPos.Line-1, 0), Column: z.CaretPos.Column}
+		newPos = CharPos{Line: max(z.caretPos.Line-1, 0), Column: z.caretPos.Column}
 		z.handleCaretEvent(CaretLeaveEvent, oldPos, newPos)
-		z.CaretPos = newPos
-		if z.CaretPos.Line == z.lineOffset-1 {
+		z.caretPos = newPos
+		if z.caretPos.Line == z.lineOffset-1 {
 			z.ScrollUp()
 			return
 		}
 	case CaretLeft:
-		if z.CaretPos.Column == 0 {
-			if z.CaretPos.Line == 0 {
+		if z.caretPos.Column == 0 {
+			if z.caretPos.Line == 0 {
 				return
 			}
 			z.MoveCaret(CaretUp)
-			newPos = CharPos{Line: z.CaretPos.Line, Column: len(z.Rows[z.CaretPos.Line]) - 1}
+			newPos = CharPos{Line: z.caretPos.Line, Column: len(z.Rows[z.caretPos.Line]) - 1}
 			z.handleCaretEvent(CaretLeaveEvent, oldPos, newPos)
-			z.CaretPos = newPos
-			if z.CaretPos.Column > z.columnOffset+z.Columns {
-				z.columnOffset = z.CaretPos.Column - z.Columns/2
+			z.caretPos = newPos
+			if z.caretPos.Column > z.columnOffset+z.Columns {
+				z.columnOffset = z.caretPos.Column - z.Columns/2
 			}
 			return
 		}
-		newPos = CharPos{Line: z.CaretPos.Line, Column: z.CaretPos.Column - 1}
+		newPos = CharPos{Line: z.caretPos.Line, Column: z.caretPos.Column - 1}
 		z.handleCaretEvent(CaretLeaveEvent, oldPos, newPos)
-		z.CaretPos = newPos
-		if z.CaretPos.Column < z.columnOffset {
+		z.caretPos = newPos
+		if z.caretPos.Column < z.columnOffset {
 			z.ScrollLeft(z.Columns / 2)
 		}
 	case CaretRight:
-		if z.CaretPos.Column >= len(z.Rows[z.CaretPos.Line])-1 {
-			z.CaretPos = CharPos{Line: z.CaretPos.Line, Column: 0}
+		if z.caretPos.Column >= len(z.Rows[z.caretPos.Line])-1 {
+			z.caretPos = CharPos{Line: z.caretPos.Line, Column: 0}
 			z.columnOffset = 0
 			z.MoveCaret(CaretDown)
 			return
 		}
-		newPos = CharPos{Line: z.CaretPos.Line, Column: z.CaretPos.Column + 1}
+		newPos = CharPos{Line: z.caretPos.Line, Column: z.caretPos.Column + 1}
 		z.handleCaretEvent(CaretLeaveEvent, oldPos, newPos)
-		z.CaretPos = newPos
-		if z.CaretPos.Column >= z.columnOffset+z.Columns {
+		z.caretPos = newPos
+		if z.caretPos.Column >= z.columnOffset+z.Columns {
 			z.ScrollRight(z.Columns / 2)
 		}
 	case CaretHome:
 		newPos = CharPos{Line: 0, Column: 0}
 		z.handleCaretEvent(CaretLeaveEvent, oldPos, newPos)
-		z.CaretPos = newPos
+		z.caretPos = newPos
 		z.SetTopLine(0)
 	case CaretEnd:
 		newTop := z.LastLine() - z.Lines + 1
 		z.SetTopLine(newTop)
 		newPos = CharPos{Line: z.LastLine(), Column: z.LastColumn(z.LastLine())}
 		z.handleCaretEvent(CaretLeaveEvent, oldPos, newPos)
-		z.CaretPos = newPos
+		z.caretPos = newPos
 	case CaretLineStart:
-		newPos = CharPos{Line: z.CaretPos.Line, Column: 0}
+		newPos = CharPos{Line: z.caretPos.Line, Column: 0}
 		if z.columnOffset > 0 {
 			z.columnOffset = 0
 		}
 		z.handleCaretEvent(CaretLeaveEvent, oldPos, newPos)
-		z.CaretPos = newPos
+		z.caretPos = newPos
 	case CaretLineEnd:
-		newPos = CharPos{Line: z.CaretPos.Line, Column: z.LastColumn(z.CaretPos.Line)}
+		newPos = CharPos{Line: z.caretPos.Line, Column: z.LastColumn(z.caretPos.Line)}
 		z.handleCaretEvent(CaretLeaveEvent, oldPos, newPos)
-		z.CaretPos = newPos
-		if z.CaretPos.Column >= z.columnOffset+z.Columns {
+		z.caretPos = newPos
+		if z.caretPos.Column >= z.columnOffset+z.Columns {
 			z.ScrollRight(z.Columns / 2)
 		}
 	case CaretHalfPageDown:
-		newLine := min(z.LastLine(), z.CaretPos.Line+z.Lines/2)
-		newPos = CharPos{Line: newLine, Column: z.CaretPos.Column}
+		newLine := min(z.LastLine(), z.caretPos.Line+z.Lines/2)
+		newPos = CharPos{Line: newLine, Column: z.caretPos.Column}
 		z.handleCaretEvent(CaretLeaveEvent, oldPos, newPos)
-		z.CaretPos = newPos
+		z.caretPos = newPos
 		if newLine > z.lineOffset+z.Lines-1 {
 			z.CenterLineOnCaret()
 		}
 	case CaretHalfPageUp:
-		newLine := max(0, z.CaretPos.Line-z.Lines/2)
-		newPos = CharPos{Line: newLine, Column: z.CaretPos.Column}
+		newLine := max(0, z.caretPos.Line-z.Lines/2)
+		newPos = CharPos{Line: newLine, Column: z.caretPos.Column}
 		z.handleCaretEvent(CaretLeaveEvent, oldPos, newPos)
-		z.CaretPos = newPos
+		z.caretPos = newPos
 		if newLine < z.lineOffset {
 			z.CenterLineOnCaret()
 		}
 	case CaretPageDown:
-		newLine := min(z.LastLine(), z.CaretPos.Line+z.Lines)
-		newPos = CharPos{Line: newLine, Column: z.CaretPos.Column}
+		newLine := min(z.LastLine(), z.caretPos.Line+z.Lines)
+		newPos = CharPos{Line: newLine, Column: z.caretPos.Column}
 		z.handleCaretEvent(CaretLeaveEvent, oldPos, newPos)
-		z.CaretPos = newPos
+		z.caretPos = newPos
 		if newLine > z.lineOffset+z.Lines-1 {
 			z.CenterLineOnCaret()
 		}
 	case CaretPageUp:
-		newLine := max(0, z.CaretPos.Line-z.Lines)
-		newPos = CharPos{Line: newLine, Column: z.CaretPos.Column}
+		newLine := max(0, z.caretPos.Line-z.Lines)
+		newPos = CharPos{Line: newLine, Column: z.caretPos.Column}
 		z.handleCaretEvent(CaretLeaveEvent, oldPos, newPos)
-		z.CaretPos = newPos
+		z.caretPos = newPos
 		if newLine < z.lineOffset {
 			z.CenterLineOnCaret()
 		}
@@ -1427,8 +1448,8 @@ func (z *Editor) MoveCaret(dir CaretMovement) {
 // hardLF and softLF as hard and soft line feed characters. The cursor position and tags
 // are updated automatically by this method.
 func (z *Editor) Insert(r []rune, pos CharPos) {
-	startRow := z.FindParagraphStart(pos.Line, z.HardLF)
-	endRow := z.FindParagraphEnd(pos.Line, z.HardLF)
+	startRow := z.FindParagraphStart(pos.Line, z.Config.HardLF)
+	endRow := z.FindParagraphEnd(pos.Line, z.Config.HardLF)
 	// endRowLastColumn := len(z.Rows[endRow].Cells) - 1
 	rows := make([][]rune, (endRow-startRow)+1)
 	for i := range rows {
@@ -1488,11 +1509,11 @@ func (z *Editor) Insert(r []rune, pos CharPos) {
 	var cline, ccol int
 	cline = pos.Line - startRow
 	ccol = pos.Column
-	if z.LineWrap {
-		rows, cline, ccol = z.WordWrapRows(rows, z.Columns, z.SoftWrap, z.HardLF, z.SoftLF,
+	if z.Config.LineWrap {
+		rows, cline, ccol = z.WordWrapRows(rows, z.Columns, z.Config.SoftWrap, z.Config.HardLF, z.Config.SoftLF,
 			cline, ccol, startRow, tags, pos)
 	}
-	z.CaretPos = CharPos{Line: cline + startRow, Column: ccol}
+	z.caretPos = CharPos{Line: cline + startRow, Column: ccol}
 	lineDelta := len(rows) - (endRow - startRow + 1)
 	// check if we need to delete rows
 	if lineDelta < 0 {
@@ -1576,7 +1597,7 @@ func (z *Editor) Delete(fromTo CharInterval) {
 			z.Rows = slices.Delete(z.Rows, fromTo.Start.Line+1, fromTo.Start.Line+2)
 		}
 		// Adjust the caret for this case.
-		if z.CaretPos.Line == fromTo.Start.Line+1 {
+		if z.caretPos.Line == fromTo.Start.Line+1 {
 			z.SetCaret(fromTo.Start)
 		}
 	} else {
@@ -1587,40 +1608,40 @@ func (z *Editor) Delete(fromTo CharInterval) {
 		z.Rows[fromTo.Start.Line] = append(z.Rows[fromTo.Start.Line], underflow...)
 		z.Rows = slices.Delete(z.Rows, fromTo.Start.Line+1, fromTo.End.Line+1)
 		// Adjust the caret as needed for this case.
-		if CmpPos(fromTo.End, z.CaretPos) < 0 {
-			if fromTo.End.Line == z.CaretPos.Line {
-				z.SetCaret(CharPos{Line: z.CaretPos.Line - (fromTo.End.Line - fromTo.Start.Line),
-					Column: fromTo.Start.Column + (z.CaretPos.Column - fromTo.End.Column) - 1})
+		if CmpPos(fromTo.End, z.caretPos) < 0 {
+			if fromTo.End.Line == z.caretPos.Line {
+				z.SetCaret(CharPos{Line: z.caretPos.Line - (fromTo.End.Line - fromTo.Start.Line),
+					Column: fromTo.Start.Column + (z.caretPos.Column - fromTo.End.Column) - 1})
 			} else {
-				z.SetCaret(CharPos{Line: z.CaretPos.Line - (fromTo.End.Line - fromTo.Start.Line),
-					Column: z.CaretPos.Column})
+				z.SetCaret(CharPos{Line: z.caretPos.Line - (fromTo.End.Line - fromTo.Start.Line),
+					Column: z.caretPos.Column})
 			}
-		} else if CmpPos(fromTo.Start, z.CaretPos) <= 0 {
+		} else if CmpPos(fromTo.Start, z.caretPos) <= 0 {
 			z.SetCaret(fromTo.Start)
 		}
 	}
 
 	// The first line might be empty now. If so, we add an appropriate line ending.
 	if len(z.Rows[fromTo.Start.Line]) == 0 {
-		if z.SoftWrap {
-			z.Rows[fromTo.Start.Line] = append(z.Rows[fromTo.Start.Line], z.SoftLF)
+		if z.Config.SoftWrap {
+			z.Rows[fromTo.Start.Line] = append(z.Rows[fromTo.Start.Line], z.Config.SoftLF)
 		} else {
-			z.Rows[fromTo.Start.Line] = append(z.Rows[fromTo.Start.Line], z.HardLF)
+			z.Rows[fromTo.Start.Line] = append(z.Rows[fromTo.Start.Line], z.Config.HardLF)
 		}
 	}
 
 	// Now we reflow with word wrap like in Insert.
-	paraStart := z.FindParagraphStart(fromTo.Start.Line, z.HardLF)
-	paraEnd := z.FindParagraphEnd(fromTo.Start.Line, z.HardLF)
+	paraStart := z.FindParagraphStart(fromTo.Start.Line, z.Config.HardLF)
+	paraEnd := z.FindParagraphEnd(fromTo.Start.Line, z.Config.HardLF)
 	rows := make([][]rune, paraEnd-paraStart+1)
 	for i := range rows {
 		rows[i] = z.Rows[i+paraStart]
 	}
 	tags, ok = z.Tags.LookupRange(z.ToEnd(fromTo.Start))
-	newCursorRow := z.CaretPos.Line
-	newCursorCol := z.CaretPos.Column
-	rows, newCursorRow, newCursorCol = z.WordWrapRows(rows, z.Columns, z.SoftWrap, z.HardLF,
-		z.SoftLF, newCursorRow-paraStart, newCursorCol, paraStart, tags, fromTo.Start)
+	newCursorRow := z.caretPos.Line
+	newCursorCol := z.caretPos.Column
+	rows, newCursorRow, newCursorCol = z.WordWrapRows(rows, z.Columns, z.Config.SoftWrap, z.Config.HardLF,
+		z.Config.SoftLF, newCursorRow-paraStart, newCursorCol, paraStart, tags, fromTo.Start)
 
 	// Check if we need to delete rows.
 	if len(rows) < paraEnd-paraStart+1 {
@@ -1772,7 +1793,7 @@ func (z *Editor) NextPos(pos CharPos) (CharPos, bool) {
 
 // Backspace deletes the character left of the caret, if there is one.
 func (z *Editor) Backspace() {
-	to := z.CaretPos
+	to := z.caretPos
 	from, changed := z.PrevPos(to)
 
 	if !changed {
@@ -1783,16 +1804,16 @@ func (z *Editor) Backspace() {
 
 // Delete1 deletes the character under the caret or the selection, if there is one.
 func (z *Editor) Delete1() {
-	from := z.CaretPos
+	from := z.caretPos
 	z.Delete(CharInterval{Start: from, End: from}) // char intervals are inclusive on both start and end
 	return
 }
 
 // Return implements the return key behavior, which creates a new line and advances the caret accordingly.
 func (z *Editor) Return() {
-	pos := z.CaretPos
+	pos := z.caretPos
 	if pos.Column == 0 {
-		z.Rows = slices.Insert(z.Rows, pos.Line, []rune{z.HardLF})
+		z.Rows = slices.Insert(z.Rows, pos.Line, []rune{z.Config.HardLF})
 		z.MoveCaret(CaretDown)
 		z.Refresh()
 		return

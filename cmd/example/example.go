@@ -11,7 +11,7 @@ func main() {
 	w := a.NewWindow("Example")
 	// w.SetFixedSize(true)
 	ed := zedit.NewEditor(80, 40, w.Canvas())
-	ed.ShowLineNumbers = true
+	ed.Config.ShowLineNumbers = true
 
 	ed.AddEmacsShortcuts()
 	s := ""
@@ -23,7 +23,7 @@ func main() {
 	ed.SetText(s)
 	w.SetContent(ed)
 	li, _ := ed.ParaToLine(10)
-	li2 := ed.FindParagraphEnd(li, ed.HardLF)
+	li2 := ed.FindParagraphEnd(li, ed.Config.HardLF)
 	ed.Select(zedit.CharInterval{Start: zedit.CharPos{Line: li, Column: 0},
 		End: zedit.CharPos{Line: li2, Column: ed.LastColumn(li2)}})
 	ed.Focus()
