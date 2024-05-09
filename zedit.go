@@ -208,7 +208,7 @@ type Editor struct {
 	mutex sync.RWMutex
 }
 
-// NewEditor returns a new editor widget with fixed columsn and lines, which is displayed in the given
+// NewEditor returns a new editor widget with fixed columns and lines, which is displayed in the given
 // canvas object. The editor has default configuration.
 func NewEditor(columns, lines int, c fyne.Canvas) *Editor {
 	config := NewConfig()
@@ -1603,7 +1603,7 @@ func (z *Editor) Delete(fromTo CharInterval) {
 	if !ok {
 		log.Println("NO TAG FOUND")
 	}
-	// The tags are now adjusted for the deletion interval (many cases to consider). Word wrapping is handled seperately.
+	// The tags are now adjusted for the deletion interval (many cases to consider). Word wrapping is handled separately.
 	if ok {
 		for _, tag := range tags {
 			if tag == nil {
