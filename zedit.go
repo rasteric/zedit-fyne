@@ -3,6 +3,7 @@ package zedit
 import (
 	"context"
 	"fmt"
+	"image/color"
 	"log"
 	"strconv"
 	"strings"
@@ -42,36 +43,37 @@ const (
 
 // Config stores configuration information for an editor.
 type Config struct {
-	SelectionTag        Tag           // the tag used for marking selection ranges
-	SelectionStyleFunc  TagStyleFunc  // style of the selection tag
-	HighlightTag        Tag           // for trasnient highlighting (usually has a different style than selection)
-	HighlightStyleFunc  TagStyleFunc  // style func for highlight
-	MarkTag             Tag           // template for the mark tags
-	MarkTags            []Tag         // a number of pre-configured tags used for marking text (default: 0..9 tags)
-	MarkStyleFunc       TagStyleFunc  // mark style func, using the tag index to distinguish marks
-	ErrorTag            Tag           // for errors
-	ParenErrorTag       Tag           // for wrong right parenthesis
-	ErrorStyleFunc      TagStyleFunc  // style of errors (default: theme error color)
-	ShowLineNumbers     bool          // switches on or off the line number display, which is in a separate grid
-	ShowWhitespace      bool          // show special glyphs for line endings (currently defunct)
-	BlendFG             BlendMode     // how layers of color are blended/composited for text foreground
-	BlendFGSwitched     bool          // whether to switch the colors while blending forground (sometimes makes a difference)
-	BlendBG             BlendMode     // how layers of color are blended for background
-	BlendBGSwitched     bool          // whether the colors are switched while blending background colors (sometimes makes a difference)
-	HardLF              rune          // hard line feed character
-	SoftLF              rune          // soft line feed character (subject to word-wrapping and deletion in text)
-	ScrollFactor        float32       // speed of scrolling
-	TabWidth            int           // If set to 0 the fyne.DefaultTabWidth is used
-	MinRefreshInterval  time.Duration // minimum interval in ms to refresh display
-	CharDrift           float32       // default 0.4, added to calculation per char when finding char position from x-position
-	LineWrap            bool          // automatically wrap lines (default: true)
-	SoftWrap            bool          // soft wrap lines, if not true wrapping inserst hard line feeds (default: true)
-	HighlightParens     bool          // highlight parentheses and quotation marks (default: true)
-	HighlightParenRange bool          // highlight the whole range between matching parens (default: false)
-	DrawCaret           bool          // if true, the caret is drawn, if false, the caret is handled but not drawn
-	CaretBlinkDelay     time.Duration // period after last interaction before caret starts blinking
-	CaretOnDuration     time.Duration // how long the caret is shown when blinking
-	CaretOffDuration    time.Duration // how long a blinking caret is off
+	SelectionTag         Tag           // the tag used for marking selection ranges
+	SelectionStyleFunc   TagStyleFunc  // style of the selection tag
+	HighlightTag         Tag           // for trasnient highlighting (usually has a different style than selection)
+	HighlightStyleFunc   TagStyleFunc  // style func for highlight
+	MarkTag              Tag           // template for the mark tags
+	MarkTags             []Tag         // a number of pre-configured tags used for marking text (default: 0..9 tags)
+	MarkStyleFunc        TagStyleFunc  // mark style func, using the tag index to distinguish marks
+	ErrorTag             Tag           // for errors
+	ParenErrorTag        Tag           // for wrong right parenthesis
+	ErrorStyleFunc       TagStyleFunc  // style of errors (default: theme error color)
+	ShowLineNumbers      bool          // switches on or off the line number display, which is in a separate grid
+	ShowWhitespace       bool          // show special glyphs for line endings (currently defunct)
+	BlendFG              BlendMode     // how layers of color are blended/composited for text foreground
+	BlendFGSwitched      bool          // whether to switch the colors while blending forground (sometimes makes a difference)
+	BlendBG              BlendMode     // how layers of color are blended for background
+	BlendBGSwitched      bool          // whether the colors are switched while blending background colors (sometimes makes a difference)
+	HardLF               rune          // hard line feed character
+	SoftLF               rune          // soft line feed character (subject to word-wrapping and deletion in text)
+	ScrollFactor         float32       // speed of scrolling
+	TabWidth             int           // If set to 0 the fyne.DefaultTabWidth is used
+	MinRefreshInterval   time.Duration // minimum interval in ms to refresh display
+	CharDrift            float32       // default 0.4, added to calculation per char when finding char position from x-position
+	LineWrap             bool          // automatically wrap lines (default: true)
+	SoftWrap             bool          // soft wrap lines, if not true wrapping inserst hard line feeds (default: true)
+	HighlightParens      bool          // highlight parentheses and quotation marks (default: true)
+	HighlightParenRange  bool          // highlight the whole range between matching parens (default: false)
+	DrawCaret            bool          // if true, the caret is drawn, if false, the caret is handled but not drawn
+	CaretBlinkDelay      time.Duration // period after last interaction before caret starts blinking
+	CaretOnDuration      time.Duration // how long the caret is shown when blinking
+	CaretOffDuration     time.Duration // how long a blinking caret is off
+	ParagraphLineNumbers bool          // line numbers are based on paragraphs to take into account soft wrap
 }
 
 // NewConfig returns a new config with default values.
@@ -155,6 +157,7 @@ func NewConfig() *Config {
 			log.Printf("Event: %v Mark: %v Interval: %v\n", evt, tag.Index(), interval)
 		})
 	}
+	z.ParagraphLineNumbers = true
 	return z
 }
 
@@ -260,19 +263,36 @@ func NewEditorWithConfig(columns, lines int, c fyne.Canvas, config *Config) *Edi
 	z.Styles.AddStyler(TagStyler{TagName: z.Config.ErrorTag.Name(),
 		StyleFunc: z.Config.ErrorStyleFunc, DrawFullLine: false})
 	// mark color and style
-	var markColors []colorful.Color
-	// if fyne.CurrentApp().Settings().ThemeVariant() == theme.VariantDark {
-	//	markColors = colorful.FastWarmPalette(10)
-	// } else {
-	isMarked := func(l, a, b float64) bool {
-		h, c, L := colorful.LabToHcl(l, a, b)
-		if fyne.CurrentApp().Settings().ThemeVariant() == theme.VariantDark {
-			return h > 0.5 && c > 0.7 && L < 0.5
-		}
-		return h > 0.5 && c > 0.7 && L > 0.7
+
+	col0, _ := colorful.MakeColor(color.RGBA{250, 190, 212, 255})
+	col1, _ := colorful.MakeColor(color.RGBA{255, 215, 180, 255})
+	col2, _ := colorful.MakeColor(color.RGBA{255, 250, 200, 255})
+	col3, _ := colorful.MakeColor(color.RGBA{170, 255, 195, 255})
+	col4, _ := colorful.MakeColor(color.RGBA{220, 190, 255, 255})
+	col5, _ := colorful.MakeColor(color.RGBA{245, 130, 48, 255})
+	col6, _ := colorful.MakeColor(color.RGBA{60, 180, 75, 255})
+	col7, _ := colorful.MakeColor(color.RGBA{255, 225, 25, 255})
+	col8, _ := colorful.MakeColor(color.RGBA{210, 245, 60, 255})
+	col9, _ := colorful.MakeColor(color.RGBA{0, 130, 200, 255})
+
+	markColors := []color.Color{
+		col0,
+		col1,
+		col2,
+		col3,
+		col4,
+		col5,
+		col6,
+		col7,
+		col8,
+		col9,
 	}
-	// Since the above function is pretty restrictive, we set ManySamples to true.
-	markColors, _ = colorful.SoftPaletteEx(10, colorful.SoftPaletteSettings{CheckColor: isMarked, Iterations: 50, ManySamples: true})
+
+	if fyne.CurrentApp().Settings().ThemeVariant() == theme.VariantDark {
+		for i := range markColors {
+			markColors[i] = BlendColors(BlendPhoenix, true, markColors[i], theme.InputBackgroundColor())
+		}
+	}
 
 	markStyler := TagStyleFunc(func(tag Tag, c widget.TextGridCell) widget.TextGridCell {
 		selStyle := &widget.CustomTextGridStyle{FGColor: theme.ForegroundColor(), BGColor: markColors[tag.Index()%10]}
@@ -378,6 +398,23 @@ func (z *Editor) FindParagraphStart(row int, lf rune) int {
 	return z.FindParagraphStart(row-1, lf)
 }
 
+// FindParagraphEnd finds the end row of the paragraph in which row is located.
+// If row is the last row, then it is returned. Otherwise, it checks for the next row that
+// ends in lf (which may be the row with which this method was called).
+func (grid *Editor) FindParagraphEnd(row int, lf rune) int {
+	if row >= len(grid.Rows)-1 {
+		return row
+	}
+	k := len(grid.Rows[row])
+	if k == 0 {
+		return row
+	}
+	if grid.Rows[row][k-1] == lf {
+		return row
+	}
+	return grid.FindParagraphEnd(row+1, lf)
+}
+
 // Text returns the Editor's text as string. Both soft and hard linefeeds are replaced with rune '\n'.
 func (z *Editor) Text() string {
 	var sb strings.Builder
@@ -412,23 +449,6 @@ func (z *Editor) Cut() {
 		return
 	}
 	z.Delete(sel)
-}
-
-// FindParagraphEnd finds the end row of the paragraph in which row is located.
-// If row is the last row, then it is returned. Otherwise, it checks for the next row that
-// ends in lf (which may be the row with which this method was called).
-func (grid *Editor) FindParagraphEnd(row int, lf rune) int {
-	if row >= len(grid.Rows)-1 {
-		return row
-	}
-	k := len(grid.Rows[row])
-	if k == 0 {
-		return row
-	}
-	if grid.Rows[row][k-1] == lf {
-		return row
-	}
-	return grid.FindParagraphEnd(row+1, lf)
 }
 
 // ScrollDown scrolls down the editor's line display by one line.
@@ -1029,12 +1049,19 @@ outer:
 		// add line numbers if necessary
 		ll := strconv.Itoa(z.lineNumberLen())
 		fmtStr := "%" + ll + "d "
-		c := z.lineOffset
+		paraLineNo := z.Config.ParagraphLineNumbers
+		showLineNo := !paraLineNo
 		for i := 0; i < z.Lines; i++ {
-			lino, ok := z.LineToPara(z.lineOffset + i)
-			s := []rune(fmt.Sprintf(fmtStr, lino))
+			var s []rune
+			if paraLineNo {
+				var lino int
+				lino, showLineNo = z.LineToPara(z.lineOffset + i)
+				s = []rune(fmt.Sprintf(fmtStr, lino))
+			} else {
+				s = []rune(fmt.Sprintf(fmtStr, z.lineOffset+i+1))
+			}
 			for j := 0; j < len(s); j++ {
-				if ok && c-1 <= z.LastLine() {
+				if showLineNo && z.lineOffset+i <= z.LastLine() {
 					z.lineNumberGrid.SetCell(i, j, widget.TextGridCell{Rune: s[j], Style: z.lineNumberStyle})
 				} else {
 					z.lineNumberGrid.SetCell(i, j, widget.TextGridCell{Rune: ' ', Style: z.lineNumberStyle})
@@ -1183,6 +1210,13 @@ func (z *Editor) handleCaretEvent(evt TagEvent, pos1, pos2 CharPos) {
 	}
 }
 
+// GetCaret returns the current caret position.
+func (z *Editor) GetCaret() CharPos {
+	return z.caretPos
+}
+
+// SetCaret sets the current caret position, taking care of paren highlighting
+// and caret events but without scrolling or refreshing the display.
 func (z *Editor) SetCaret(pos CharPos) {
 	// handle caret leave event
 	z.handleCaretEvent(CaretLeaveEvent, z.caretPos, pos)
@@ -1842,7 +1876,6 @@ func (z *Editor) maybeStyleRange(tag Tag, interval CharInterval, styler TagStyle
 			xj := j + z.columnOffset
 			if interval.Contains(CharPos{Line: xi, Column: xj}) {
 				z.grid.Rows[i].Cells[j] = styler(tag, z.grid.Rows[i].Cells[j])
-				// z.grid.SetCell(i, j, styler(tag, z.grid.Rows[i].Cells[j]))
 			}
 		}
 	}

@@ -22,10 +22,6 @@ func main() {
 	s = s[:len(s)-1]
 	ed.SetText(s)
 	w.SetContent(ed)
-	li, _ := ed.ParaToLine(10)
-	li2 := ed.FindParagraphEnd(li, ed.Config.HardLF)
-	ed.Select(zedit.CharInterval{Start: zedit.CharPos{Line: li, Column: 0},
-		End: zedit.CharPos{Line: li2, Column: ed.LastColumn(li2)}})
 	ed.Focus()
 	w.ShowAndRun()
 }
