@@ -1,7 +1,11 @@
 package zedit
 
 import (
+	"encoding/json"
+	"log"
+	"reflect"
 	"slices"
+	"strconv"
 	"sync"
 
 	"fyne.io/fyne/v2/widget"
@@ -17,34 +21,121 @@ const (
 )
 
 type TagFunc func(evt TagEvent, tag Tag, interval CharInterval)
+type TagStyleFunc func(tag Tag, c widget.TextGridCell) widget.TextGridCell
+type CustomTagUnmarshallerFunc func(typeName string, in []byte) (Tag, error)
+
+// CustomTagUnmarshaller should be set to a function that takes the type name and []byte,
+// and returns the appropriate custom Tag based on how MarshalJSON is implemented for that tag.
+// The unmarshaller for all tags will automatically dispatch to this function when unmarshalling
+// a custom tag implemented by the user of this package. This is a bit safer and more flexible
+// than trying to do this automatically using reflection.
+var CustomTagUnmarshaller CustomTagUnmarshallerFunc
 
 // Tags are used to store information about the editor text associated with intervals.
 // A tag's position is adjusted automatically as the editor text changes.
 // Stylers can be associated to multiple tags with the same name.
 type Tag interface {
-	Name() string           // return the tag's name, which is used for stylers
-	Index() int             // return the tag's new index, indicating a serial number for tags with the same name
-	Clone(newIndex int) Tag // clone the tag, giving it a new index
-	Callback() TagFunc      // called when TagEvents happen
-	SetCallback(cb TagFunc) // set the callback function
-	UserData() any          // optional payload
-	SetUserData(data any)   // set optional payload
+	Name() string                    // return the tag's name, which is used for stylers
+	Index() int                      // return the tag's new index, a serial number for tags with the same name
+	Clone(newIndex int) Tag          // clone the tag, giving it a new index
+	Callback() TagFunc               // called when TagEvents happen
+	SetCallback(cb TagFunc)          // set the callback function
+	UserData() any                   // optional payload
+	SetUserData(data any)            // set optional payload
+	MarshalJSON() ([]byte, error)    // for serialization
+	UnmarshalJSON(data []byte) error // for deserialization
 }
 
 // StandardTag is the default implementation of a Tag.
 type StandardTag struct {
 	name    string
 	index   int
-	cb      TagFunc
 	payload any
+	cb      TagFunc
 }
 
-type TagStyleFunc func(tag Tag, c widget.TextGridCell) widget.TextGridCell
+// tagData is only used for serialization, write your own custom marshaler
+// for JSON if you implement a different tag
+type tagData struct {
+	Name  string
+	Index json.Number
+}
 
+// TagSyler styles tags with the given name.
 type TagStyler struct {
 	TagName      string
 	StyleFunc    TagStyleFunc
 	DrawFullLine bool
+}
+
+// TagWithInterval stores a tag and its accompanying interval.
+type TagWithInterval struct {
+	Tag      Tag
+	Interval CharInterval
+}
+
+type typedTagWithInterval struct {
+	Type     string
+	Tag      Tag
+	Interval CharInterval
+}
+
+func (t TagWithInterval) MarshalJSON() ([]byte, error) {
+	var s string
+	switch t.Tag.(type) {
+	case *StandardTag:
+		s = "StandardTag"
+	default:
+		s = reflect.TypeOf(t.Tag).String()
+	}
+	b, err := json.Marshal(typedTagWithInterval{
+		Type:     s,
+		Tag:      t.Tag,
+		Interval: t.Interval,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+func (t *TagWithInterval) UnmarshalJSON(in []byte) error {
+	var data struct {
+		Type     string
+		Tag      json.RawMessage
+		Interval json.RawMessage
+	}
+	err := json.Unmarshal(in, &data)
+	if err != nil {
+		return err
+	}
+	var tag Tag
+	switch data.Type {
+	case "StandardTag":
+		s := &StandardTag{}
+		err := json.Unmarshal(data.Tag, s)
+		if err != nil {
+			return err
+		}
+		tag = s
+	default:
+		if CustomTagUnmarshaller == nil {
+			log.Printf("failed to read some text data, unsupported custom tag: %v\n", data.Type)
+		} else {
+			tag, err = CustomTagUnmarshaller(data.Type, data.Tag)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	var interval CharInterval
+	err = json.Unmarshal(data.Interval, &interval)
+	if err != nil {
+		return err
+	}
+	t.Tag = tag
+	t.Interval = interval
+	return nil
 }
 
 func NewTag(name string) *StandardTag {
@@ -69,6 +160,26 @@ func (s *StandardTag) Callback() TagFunc {
 
 func (s *StandardTag) SetCallback(cb TagFunc) {
 	s.cb = cb
+}
+
+func (s StandardTag) MarshalJSON() ([]byte, error) {
+	tag := tagData{Name: s.Name(), Index: json.Number(strconv.Itoa(s.Index()))}
+	return json.Marshal(tag)
+}
+
+func (s *StandardTag) UnmarshalJSON(data []byte) error {
+	tag := tagData{}
+	err := json.Unmarshal(data, &tag)
+	if err != nil {
+		return err
+	}
+	s.name = tag.Name
+	idx, err := tag.Index.Int64()
+	if err != nil {
+		return err
+	}
+	s.index = int(idx)
+	return nil
 }
 
 func (s *StandardTag) Clone(newIndex int) Tag {
@@ -99,6 +210,24 @@ func NewTagContainer() *TagContainer {
 	c.names = make(map[string]*orderedset.OrderedSet[Tag])
 	c.lookup = interval.NewMultiValueSearchTreeWithOptions[Tag, CharPos](CmpPos, interval.TreeWithIntervalPoint())
 	return &c
+}
+
+func (c *TagContainer) AllTags() []TagWithInterval {
+	all := make([]TagWithInterval, 0)
+	for k, v := range c.tags {
+		all = append(all, TagWithInterval{Tag: k, Interval: v})
+	}
+	return all
+}
+
+func (c *TagContainer) SetAllTags(tags []TagWithInterval) {
+	c.Clear()
+	for _, tag := range tags {
+		if tag.Tag == nil {
+			continue
+		}
+		c.Add(tag.Interval, tag.Tag)
+	}
 }
 
 // Clear deletes all tags in the container but retains stylers.

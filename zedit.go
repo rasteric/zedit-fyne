@@ -1,10 +1,14 @@
 package zedit
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"image/color"
+	"io"
 	"log"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,6 +28,16 @@ import (
 	"golang.org/x/exp/slices"
 )
 
+const MAGIC = 86637303 // magic cookie
+const VERSION = 100    // this version 100 == "v1.0.0"
+const MINVERSION = 100 // minimum required version
+
+var ErrInvalidStream = fmt.Errorf("invalid input text format")
+var ErrVersionTooLow = fmt.Errorf("this software's version for input text reading is outdated and cannot read the provided text")
+var ErrTooManyLines = fmt.Errorf("too many lines, the input text could not be read because it is too large")
+var ErrTooLongLine = fmt.Errorf("a line in the input text was too large")
+var ErrTooManyTags = fmt.Errorf("the input text has too many tags")
+
 type CaretMovement int
 
 const (
@@ -41,39 +55,51 @@ const (
 	CaretPageUp
 )
 
+type TagPreWriteFunc func(tag TagWithInterval) error // used before a tag is written
+type TagPostReadFunc func(tag TagWithInterval) error // used after a tag has been read
+type CustomSaveFunc func(enc *json.Encoder) error    // used for writing custom data during Save()
+type CustomLoadFunc func(dec *json.Decoder) error    // used for reading custom data during Load()
+
 // Config stores configuration information for an editor.
 type Config struct {
-	SelectionTag         Tag           // the tag used for marking selection ranges
-	SelectionStyleFunc   TagStyleFunc  // style of the selection tag
-	HighlightTag         Tag           // for trasnient highlighting (usually has a different style than selection)
-	HighlightStyleFunc   TagStyleFunc  // style func for highlight
-	MarkTag              Tag           // template for the mark tags
-	MarkTags             []Tag         // a number of pre-configured tags used for marking text (default: 0..9 tags)
-	MarkStyleFunc        TagStyleFunc  // mark style func, using the tag index to distinguish marks
-	ErrorTag             Tag           // for errors
-	ParenErrorTag        Tag           // for wrong right parenthesis
-	ErrorStyleFunc       TagStyleFunc  // style of errors (default: theme error color)
-	ShowLineNumbers      bool          // switches on or off the line number display, which is in a separate grid
-	ShowWhitespace       bool          // show special glyphs for line endings (currently defunct)
-	BlendFG              BlendMode     // how layers of color are blended/composited for text foreground
-	BlendFGSwitched      bool          // whether to switch the colors while blending forground (sometimes makes a difference)
-	BlendBG              BlendMode     // how layers of color are blended for background
-	BlendBGSwitched      bool          // whether the colors are switched while blending background colors (sometimes makes a difference)
-	HardLF               rune          // hard line feed character
-	SoftLF               rune          // soft line feed character (subject to word-wrapping and deletion in text)
-	ScrollFactor         float32       // speed of scrolling
-	TabWidth             int           // If set to 0 the fyne.DefaultTabWidth is used
-	MinRefreshInterval   time.Duration // minimum interval in ms to refresh display
-	CharDrift            float32       // default 0.4, added to calculation per char when finding char position from x-position
-	LineWrap             bool          // automatically wrap lines (default: true)
-	SoftWrap             bool          // soft wrap lines, if not true wrapping inserst hard line feeds (default: true)
-	HighlightParens      bool          // highlight parentheses and quotation marks (default: true)
-	HighlightParenRange  bool          // highlight the whole range between matching parens (default: false)
-	DrawCaret            bool          // if true, the caret is drawn, if false, the caret is handled but not drawn
-	CaretBlinkDelay      time.Duration // period after last interaction before caret starts blinking
-	CaretOnDuration      time.Duration // how long the caret is shown when blinking
-	CaretOffDuration     time.Duration // how long a blinking caret is off
-	ParagraphLineNumbers bool          // line numbers are based on paragraphs to take into account soft wrap
+	SelectionTag         Tag             // the tag used for marking selection ranges
+	SelectionStyleFunc   TagStyleFunc    // style of the selection tag
+	HighlightTag         Tag             // for trasnient highlighting (usually has a different style than selection)
+	HighlightStyleFunc   TagStyleFunc    // style func for highlight
+	MarkTag              Tag             // template for the mark tags
+	MarkTags             []Tag           // a number of pre-configured tags used for marking text (default: 0..9 tags)
+	MarkStyleFunc        TagStyleFunc    // mark style func, using the tag index to distinguish marks
+	ErrorTag             Tag             // for errors
+	ParenErrorTag        Tag             // for wrong right parenthesis
+	ErrorStyleFunc       TagStyleFunc    // style of errors (default: theme error color)
+	ShowLineNumbers      bool            // switches on or off the line number display, which is in a separate grid
+	ShowWhitespace       bool            // show special glyphs for line endings (currently defunct)
+	BlendFG              BlendMode       // how layers of color are blended/composited for text foreground
+	BlendFGSwitched      bool            // whether to switch the colors while blending forground (sometimes makes a difference)
+	BlendBG              BlendMode       // how layers of color are blended for background
+	BlendBGSwitched      bool            // whether the colors are switched while blending background colors (sometimes makes a difference)
+	HardLF               rune            // hard line feed character
+	SoftLF               rune            // soft line feed character (subject to word-wrapping and deletion in text)
+	ScrollFactor         float32         // speed of scrolling
+	TabWidth             int             // If set to 0 the fyne.DefaultTabWidth is used
+	MinRefreshInterval   time.Duration   // minimum interval in ms to refresh display
+	CharDrift            float32         // default 0.4, added to calculation per char when finding char position from x-position
+	LineWrap             bool            // automatically wrap lines (default: true)
+	SoftWrap             bool            // soft wrap lines, if not true wrapping inserst hard line feeds (default: true)
+	HighlightParens      bool            // highlight parentheses and quotation marks (default: true)
+	HighlightParenRange  bool            // highlight the whole range between matching parens (default: false)
+	DrawCaret            bool            // if true, the caret is drawn, if false, the caret is handled but not drawn
+	CaretBlinkDelay      time.Duration   // period after last interaction before caret starts blinking
+	CaretOnDuration      time.Duration   // how long the caret is shown when blinking
+	CaretOffDuration     time.Duration   // how long a blinking caret is off
+	ParagraphLineNumbers bool            // line numbers are based on paragraphs to take into account soft wrap
+	TagPreWrite          TagPreWriteFunc // called before a tag is written
+	TagPostRead          TagPostReadFunc // called after a tag has been read, may be used to re-store callback
+	CustomLoader         CustomLoadFunc  // called during Load after the editor has loaded everything else
+	CustomSaver          CustomSaveFunc  // called after during Save everything else has been saved
+	MaxLines             int64           // maximum number of lines (if 0 or below, no limit) only used during Load
+	MaxColumn            int64           // maximum column length (if 0 or below, no limit) only used during Load
+	MaxTags              int64           // maximum number of tags (if 0 or below, no limit) only used during Load
 }
 
 // NewConfig returns a new config with default values.
@@ -100,6 +126,14 @@ func NewConfig() *Config {
 			Style: selStyle,
 		}
 	})
+	z.TagPreWrite = TagPreWriteFunc(func(tag TagWithInterval) error {
+		return nil
+	})
+	z.TagPostRead = TagPostReadFunc(func(tag TagWithInterval) error {
+		return nil
+	})
+	z.MaxLines = 1000000
+	z.MaxColumn = 1000000
 	z.HighlightTag = NewTag("highlight")
 	z.HighlightStyleFunc = TagStyleFunc(func(tag Tag, c widget.TextGridCell) widget.TextGridCell {
 		fg := theme.TextColor()
@@ -264,16 +298,16 @@ func NewEditorWithConfig(columns, lines int, c fyne.Canvas, config *Config) *Edi
 		StyleFunc: z.Config.ErrorStyleFunc, DrawFullLine: false})
 	// mark color and style
 
-	col0, _ := colorful.MakeColor(color.RGBA{250, 190, 212, 255})
+	col0, _ := colorful.MakeColor(color.RGBA{210, 245, 60, 255})
 	col1, _ := colorful.MakeColor(color.RGBA{255, 215, 180, 255})
 	col2, _ := colorful.MakeColor(color.RGBA{255, 250, 200, 255})
 	col3, _ := colorful.MakeColor(color.RGBA{170, 255, 195, 255})
 	col4, _ := colorful.MakeColor(color.RGBA{220, 190, 255, 255})
-	col5, _ := colorful.MakeColor(color.RGBA{245, 130, 48, 255})
-	col6, _ := colorful.MakeColor(color.RGBA{60, 180, 75, 255})
-	col7, _ := colorful.MakeColor(color.RGBA{255, 225, 25, 255})
-	col8, _ := colorful.MakeColor(color.RGBA{210, 245, 60, 255})
-	col9, _ := colorful.MakeColor(color.RGBA{0, 130, 200, 255})
+	col5, _ := colorful.MakeColor(color.RGBA{250, 190, 212, 255})
+	col6, _ := colorful.MakeColor(color.RGBA{255, 225, 25, 255})
+	col7, _ := colorful.MakeColor(color.RGBA{0, 130, 200, 255})
+	col8, _ := colorful.MakeColor(color.RGBA{60, 180, 75, 255})
+	col9, _ := colorful.MakeColor(color.RGBA{245, 130, 48, 255})
 
 	markColors := []color.Color{
 		col0,
@@ -703,6 +737,25 @@ func (z *Editor) SetText(s string) {
 		}
 	}
 	z.Refresh()
+}
+
+// GetText returns the text of the whole editor as a unicode string.
+func (z *Editor) GetText() string {
+	var sb strings.Builder
+	for i := range z.Rows {
+		for j := 0; j < len(z.Rows[i])-1; j++ {
+			sb.WriteRune(z.Rows[i][j])
+		}
+		switch z.Rows[i][len(z.Rows[i])-1] {
+		case z.Config.SoftLF:
+			// do nothing
+		case z.Config.HardLF:
+			sb.WriteRune(z.Config.HardLF)
+		default:
+			sb.WriteRune(z.Rows[i][len(z.Rows[i])-1])
+		}
+	}
+	return sb.String()
 }
 
 // wrapLine word wraps a line of runes according to the editor settings for soft wrapping.
@@ -1846,6 +1899,10 @@ func (z *Editor) Delete1() {
 // Return implements the return key behavior, which creates a new line and advances the caret accordingly.
 func (z *Editor) Return() {
 	pos := z.caretPos
+	tags, ok := z.Tags.LookupRange(z.ToEnd(pos))
+	if ok {
+		z.adjustTagLines(tags, 1, pos)
+	}
 	if pos.Column == 0 {
 		z.Rows = slices.Insert(z.Rows, pos.Line, []rune{z.Config.HardLF})
 		z.MoveCaret(CaretDown)
@@ -1855,8 +1912,270 @@ func (z *Editor) Return() {
 	buff := z.Rows[pos.Line][pos.Column:]
 	z.Rows[pos.Line] = z.Rows[pos.Line][:pos.Column]
 	z.Rows = slices.Insert(z.Rows, pos.Line+1, slices.Clone(buff))
+	z.Rows[pos.Line] = append(z.Rows[pos.Line], z.Config.HardLF)
 	z.Refresh()
 	z.MoveCaret(CaretRight)
+}
+
+// READ AND WRITE
+
+type header struct {
+	Magic         uint64
+	Version       uint64
+	MinVersion    uint64
+	HasCustomSave bool
+}
+
+type footer struct {
+	CaretLine   int64
+	CaretColumn int64
+	LineOffset  uint64
+}
+
+// SaveTextToFile saves the text as unicode to a file. Nothing else beside the text is saved.
+func (z *Editor) SaveTextToFile(filepath string) error {
+	z.mutex.Lock()
+	defer z.mutex.Unlock()
+	fi, err := os.OpenFile(filepath, os.O_CREATE|os.O_WRONLY, 0666)
+	if err != nil {
+		return err
+	}
+	defer fi.Close()
+	_, err = fi.WriteString(z.GetText())
+	return err
+}
+
+// LoadTextFromFile loads unicode text from the given file.
+func (z *Editor) LoadTextFromFile(filepath string) error {
+	defer z.Refresh()
+	z.mutex.Lock()
+	defer z.mutex.Unlock()
+	z.Tags.Clear()
+	fi, err := os.Open(filepath)
+	if err != nil {
+		return err
+	}
+	defer fi.Close()
+	b := &bytes.Buffer{}
+	io.Copy(b, fi)
+	z.SetText(b.String())
+	return nil
+}
+
+// SaveMiscDataToFile saves tags and miscellaneous data to the given file. This can be used instead of
+// SaveToFile if plaintext unicode file and miscellaneous data are supposed to be stored separately.
+func (z *Editor) SaveMiscDataToFile(filepath string) error {
+	z.mutex.Lock()
+	defer z.mutex.Unlock()
+	fi, err := os.OpenFile(filepath, os.O_CREATE|os.O_WRONLY, 0666)
+	if err != nil {
+		return err
+	}
+	defer fi.Close()
+	enc := json.NewEncoder(fi)
+	if err := z.saveHeader(enc); err != nil {
+		return err
+	}
+	if err := z.saveTags(enc); err != nil {
+		return err
+	}
+	if z.Config.CustomSaver != nil {
+		if err := z.Config.CustomSaver(enc); err != nil {
+			return err
+		}
+	}
+	if err := z.saveFooter(enc); err != nil {
+		return err
+	}
+	return nil
+}
+
+// LoadMiscDataFromFile loads the miscellaneous data and tags from the file. It's important to first
+// load the text and then call this function, since it sets cursor and tags to values that assume the
+// text is present.
+func (z *Editor) LoadMiscDataFromFile(filepath string) error {
+	defer z.Refresh()
+	z.mutex.Lock()
+	defer z.mutex.Unlock()
+	in, err := os.Open(filepath)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	dec := json.NewDecoder(in)
+
+	var h header
+	if h, err = z.loadHeader(dec); err != nil {
+		return err
+	}
+	if err := z.loadTags(dec); err != nil {
+		return err
+	}
+	if h.HasCustomSave && z.Config.CustomLoader != nil {
+		if err := z.Config.CustomLoader(dec); err != nil {
+			return err
+		}
+	}
+	if err := z.loadFooter(dec); err != nil {
+		return err
+	}
+	return nil
+}
+
+// SaveToFile saves the editor's content to a file.
+func (z *Editor) SaveToFile(filepath string) error {
+	fi, err := os.OpenFile(filepath, os.O_CREATE|os.O_WRONLY, 0666)
+	if err != nil {
+		return err
+	}
+	defer fi.Close()
+	return z.Save(fi)
+}
+
+// Save the contents of the editor.
+func (z *Editor) Save(out io.Writer) error {
+	z.mutex.Lock()
+	defer z.mutex.Unlock()
+	enc := json.NewEncoder(out)
+	if err := z.saveHeader(enc); err != nil {
+		return err
+	}
+	if err := z.saveText(enc); err != nil {
+		return err
+	}
+	if err := z.saveTags(enc); err != nil {
+		return err
+	}
+	if z.Config.CustomSaver != nil {
+		if err := z.Config.CustomSaver(enc); err != nil {
+			return err
+		}
+	}
+	if err := z.saveFooter(enc); err != nil {
+		return err
+	}
+	return nil
+}
+
+// saveHeader saves the miscellaneous info and version information to the stream
+// This also writes data that can later be used for checking a stream is adequate.
+func (z *Editor) saveHeader(enc *json.Encoder) error {
+	h := header{Magic: MAGIC, Version: VERSION, MinVersion: MINVERSION, HasCustomSave: z.Config.CustomSaver != nil}
+	return enc.Encode(h)
+}
+
+// saveFooter saves miscellaneous info that needs to be set after the text and tags have been read.
+func (z *Editor) saveFooter(enc *json.Encoder) error {
+	var f footer
+	f.CaretLine = int64(z.caretPos.Line)
+	f.CaretColumn = int64(z.caretPos.Column)
+	f.LineOffset = uint64(z.lineOffset)
+	return enc.Encode(f)
+}
+
+// saveText writes the text of the editor as UTF8. No header data is written.
+// Use Save to save all the contents including tags.
+func (z *Editor) saveText(enc *json.Encoder) error {
+	if err := enc.Encode(z.Rows); err != nil {
+		return err
+	}
+	return nil
+}
+
+// saveTags writes out the tags plus intervals, each one encoded by gob.
+func (z *Editor) saveTags(enc *json.Encoder) error {
+	allTags := z.Tags.AllTags()
+	if err := enc.Encode(allTags); err != nil {
+		return err
+	}
+	return nil
+}
+
+// LoadFromFile loads the editor contents from the given file.
+func (z *Editor) LoadFromFile(filepath string) error {
+	fi, err := os.Open(filepath)
+	if err != nil {
+		return err
+	}
+	defer fi.Close()
+	return z.Load(fi)
+}
+
+// Load loads the contents into the editor.
+func (z *Editor) Load(in io.Reader) error {
+	defer z.Refresh()
+	z.mutex.Lock()
+	defer z.mutex.Unlock()
+	dec := json.NewDecoder(in)
+
+	var h header
+	var err error
+	if h, err = z.loadHeader(dec); err != nil {
+		return err
+	}
+	z.Rows = nil
+	if err := z.loadText(dec); err != nil {
+		return err
+	}
+	if err := z.loadTags(dec); err != nil {
+		return err
+	}
+	if h.HasCustomSave && z.Config.CustomLoader != nil {
+		if err := z.Config.CustomLoader(dec); err != nil {
+			return err
+		}
+	}
+	if err := z.loadFooter(dec); err != nil {
+		return err
+	}
+	return nil
+}
+
+// loadHeader loads info from the stream and returns ErrInvalidStream or ErrVersionTooLow
+// when the stream is not adequate (other errors may also occur if the stream is malformed).
+func (z *Editor) loadHeader(dec *json.Decoder) (header, error) {
+	var h header
+	if err := dec.Decode(&h); err != nil {
+		return h, err
+	}
+	if h.Magic != MAGIC {
+		return h, ErrInvalidStream
+	}
+	if VERSION < h.MinVersion {
+		return h, ErrVersionTooLow
+	}
+	return h, nil
+}
+
+// loadFooter loads the footer data and sets it in the editor (after everything else has been set)
+func (z *Editor) loadFooter(dec *json.Decoder) error {
+	var f footer
+	if err := dec.Decode(&f); err != nil {
+		return err
+	}
+	z.lineOffset = int(f.LineOffset)
+	z.caretPos = CharPos{Line: int(f.CaretLine), Column: int(f.CaretColumn)}
+	return nil
+}
+
+// loadText loads the UTF8 text into the editor. Use Load if you want to check versions and
+// headers.
+func (z *Editor) loadText(dec *json.Decoder) error {
+	z.Rows = make([][]rune, 0)
+	if err := dec.Decode(&z.Rows); err != nil {
+		return err
+	}
+	return nil
+}
+
+// loadTags loads the tags that have been encoded by saveTags.
+func (z *Editor) loadTags(dec *json.Decoder) error {
+	tags := make([]TagWithInterval, 0)
+	if err := dec.Decode(&tags); err != nil {
+		return err
+	}
+	z.Tags.SetAllTags(tags)
+	return nil
 }
 
 // STYLES
