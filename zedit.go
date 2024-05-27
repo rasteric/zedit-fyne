@@ -24,6 +24,7 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	"github.com/chewxy/math32"
+	"github.com/dimchansky/utfbom"
 	"github.com/lucasb-eyer/go-colorful"
 	"golang.org/x/exp/slices"
 )
@@ -346,6 +347,8 @@ func NewEditorWithConfig(columns, lines int, c fyne.Canvas, config *Config) *Edi
 // change that might affect the number of rows.
 func (z *Editor) adjustScroll() {
 	z.vSpacer.SetHeight(float32(len(z.Rows)) * z.charSize.Height)
+	pos := z.scroll.Offset
+	z.scroll.Offset = fyne.Position{X: pos.X, Y: max(0, z.charSize.Height*float32(z.lineOffset))}
 }
 
 // initInternalGrid initializes the internal grid (z.grid) to all spaces Lines x Columns.
@@ -1950,15 +1953,35 @@ func (z *Editor) LoadTextFromFile(filepath string) error {
 	defer z.Refresh()
 	z.mutex.Lock()
 	defer z.mutex.Unlock()
-	z.Tags.Clear()
 	fi, err := os.Open(filepath)
 	if err != nil {
 		return err
 	}
 	defer fi.Close()
+	in, enc := utfbom.Skip(fi)
+	if !(enc == utfbom.Unknown || enc == utfbom.UTF8) {
+		return ErrInvalidStream
+	}
 	b := &bytes.Buffer{}
-	io.Copy(b, fi)
+	io.Copy(b, in)
 	z.SetText(b.String())
+	return nil
+}
+
+// LoadText loads a UTF8 text from an input stream.
+func (z *Editor) LoadText(in io.Reader) error {
+	z.mutex.Lock()
+	defer z.mutex.Unlock()
+	in2, enc := utfbom.Skip(in)
+	if !(enc == utfbom.Unknown || enc == utfbom.UTF8) {
+		return ErrInvalidStream
+	}
+	b, err := io.ReadAll(in2)
+	if err != nil {
+		return err
+	}
+	z.SetText(string(b))
+	z.SetCaret(CharPos{Line: z.LastLine(), Column: z.LastColumn(z.LastLine())})
 	return nil
 }
 
@@ -2104,6 +2127,8 @@ func (z *Editor) LoadFromFile(filepath string) error {
 // Load loads the contents into the editor.
 func (z *Editor) Load(in io.Reader) error {
 	defer z.Refresh()
+	z.Hide()
+	defer z.Show()
 	z.mutex.Lock()
 	defer z.mutex.Unlock()
 	dec := json.NewDecoder(in)

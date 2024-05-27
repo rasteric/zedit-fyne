@@ -49,6 +49,18 @@ func main() {
 				}
 			}, w)
 		})
+	ed.AddShortcutHandler(&desktop.CustomShortcut{KeyName: fyne.KeyL, Modifier: fyne.KeyModifierControl},
+		func(z *zedit.Editor) {
+			dialog.ShowFileOpen(func(uri fyne.URIReadCloser, err error) {
+				if uri == nil || err != nil {
+					return
+				}
+				defer uri.Close()
+				if err := z.LoadText(uri); err != nil {
+					dialog.ShowError(err, w)
+				}
+			}, w)
+		})
 	ed.Focus()
 	w.ShowAndRun()
 }
