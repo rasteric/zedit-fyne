@@ -101,6 +101,7 @@ type Config struct {
 	MaxLines             int64           // maximum number of lines (if 0 or below, no limit) only used during Load
 	MaxColumn            int64           // maximum column length (if 0 or below, no limit) only used during Load
 	MaxTags              int64           // maximum number of tags (if 0 or below, no limit) only used during Load
+	MaxPrintLines        int             // maximum number of lines for printing for console mode, preceding lines are cut off
 }
 
 // NewConfig returns a new config with default values.
@@ -193,6 +194,7 @@ func NewConfig() *Config {
 		})
 	}
 	z.ParagraphLineNumbers = true
+	z.MaxPrintLines = 10000
 	return z
 }
 
@@ -221,9 +223,9 @@ type Editor struct {
 	charSize             fyne.Size
 	border               *fyne.Container
 	lastInteraction      time.Time
-	defaultStyle         EditorStyle
-	invertedDefaultStyle EditorStyle
-	lineNumberStyle      EditorStyle
+	defaultStyle         Style
+	invertedDefaultStyle Style
+	lineNumberStyle      Style
 	lineNumberGrid       *widget.TextGrid
 	vSpacer              *FixedSpacer
 	maxLineLen           int
@@ -269,9 +271,9 @@ func NewEditorWithConfig(columns, lines int, c fyne.Canvas, config *Config) *Edi
 	z.caretState = 1
 	z.Tags = NewTagContainer()
 	_, z.caretBlinkCancel = context.WithCancel(context.Background())
-	z.invertedDefaultStyle = &CustomEditorStyle{FGColor: theme.InputBackgroundColor(), BGColor: theme.ForegroundColor()}
-	z.defaultStyle = &CustomEditorStyle{FGColor: theme.ForegroundColor(), BGColor: theme.InputBackgroundColor()}
-	z.lineNumberStyle = &CustomEditorStyle{FGColor: fgcolor, BGColor: bgcolor}
+	z.invertedDefaultStyle = Style{FGColor: theme.InputBackgroundColor(), BGColor: theme.ForegroundColor()}
+	z.defaultStyle = Style{FGColor: theme.ForegroundColor(), BGColor: theme.InputBackgroundColor()}
+	z.lineNumberStyle = Style{FGColor: fgcolor, BGColor: bgcolor}
 	z.background = canvas.NewRectangle(theme.InputBackgroundColor()) //theme.InputBackgroundColor())
 	z.background.StrokeColor = theme.FocusColor()
 	z.background.StrokeWidth = 4
@@ -365,7 +367,7 @@ func (z *Editor) initInternalGrid() {
 }
 
 // SetLineNumberStyle sets the style of the line number display in terms of an EditorStyle.
-func (z *Editor) SetLineNumberStyle(style EditorStyle) {
+func (z *Editor) SetLineNumberStyle(style Style) {
 	z.lineNumberStyle = style
 }
 
@@ -761,6 +763,25 @@ func (z *Editor) GetText() string {
 	return sb.String()
 }
 
+// Print prints a string at the current cursor position, advancing the cursor
+// and applying the given tags to the string. The string may have multiple lines.
+// This method is for console mode applications and should not be used for user editing.
+// If config.MaxPrintLines is exceeded, lines are cut off at the beginning of the
+// buffer.
+func (z *Editor) Print(s string, tags []Tag) {
+	lines := strings.Split(s, "\n")
+	for _, line := range lines {
+		pos := z.caretPos
+		r := []rune(line)
+		z.Insert(r, pos)
+		if tags != nil {
+			pos2 := z.caretPos
+			z.Tags.Add(CharInterval{Start: pos, End: pos2}, tags...)
+		}
+		z.Return()
+	}
+}
+
 // wrapLine word wraps a line of runes according to the editor settings for soft wrapping.
 func (z *Editor) wrapLine(r []rune) [][]rune {
 	var b strings.Builder
@@ -1118,9 +1139,11 @@ outer:
 			}
 			for j := 0; j < len(s); j++ {
 				if showLineNo && z.lineOffset+i <= z.LastLine() {
-					z.lineNumberGrid.SetCell(i, j, widget.TextGridCell{Rune: s[j], Style: z.lineNumberStyle})
+					z.lineNumberGrid.SetCell(i, j, widget.TextGridCell{Rune: s[j],
+						Style: z.lineNumberStyle.ToTextGridStyle()})
 				} else {
-					z.lineNumberGrid.SetCell(i, j, widget.TextGridCell{Rune: ' ', Style: z.lineNumberStyle})
+					z.lineNumberGrid.SetCell(i, j, widget.TextGridCell{Rune: ' ',
+						Style: z.lineNumberStyle.ToTextGridStyle()})
 				}
 			}
 		}
@@ -1179,9 +1202,9 @@ func (z *Editor) maybeDrawCaret() bool {
 	col = SafePositiveValue(col, len(z.grid.Rows[line].Cells)-1)
 	switch atomic.LoadUint32(&z.caretState) {
 	case 2:
-		z.grid.Rows[line].Cells[col].Style = z.invertedDefaultStyle
+		z.grid.Rows[line].Cells[col].Style = z.invertedDefaultStyle.ToTextGridStyle()
 	default:
-		z.grid.Rows[line].Cells[col].Style = z.defaultStyle
+		z.grid.Rows[line].Cells[col].Style = z.defaultStyle.ToTextGridStyle()
 	}
 	z.grid.Refresh()
 	return true

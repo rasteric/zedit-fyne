@@ -14,6 +14,7 @@ require (
 )
 
 require (
+	fyne.io/fyne v1.4.3 // indirect
 	github.com/dimchansky/utfbom v1.1.1 // indirect
 	github.com/fredbi/uri v1.0.0 // indirect
 	github.com/fyne-io/gl-js v0.0.0-20220119005834-d2da28d9ccfe // indirect

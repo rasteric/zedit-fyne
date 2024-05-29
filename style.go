@@ -1,20 +1,20 @@
 package zedit
 
-import "image/color"
+import (
+	"image/color"
 
-type EditorStyle interface {
-	TextColor() color.Color
-	BackgroundColor() color.Color
-}
+	"fyne.io/fyne/widget"
+)
 
-type CustomEditorStyle struct {
+type Style struct {
 	FGColor, BGColor color.Color
 }
 
-func (s *CustomEditorStyle) TextColor() color.Color {
-	return s.FGColor
+func (s Style) ToTextGridStyle() widget.TextGridStyle {
+	return &widget.CustomTextGridStyle{FGColor: s.FGColor, BGColor: s.BGColor}
 }
 
-func (s *CustomEditorStyle) BackgroundColor() color.Color {
-	return s.BGColor
+type Cell struct {
+	Rune  rune
+	Style Style
 }
