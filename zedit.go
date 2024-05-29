@@ -64,15 +64,15 @@ type CustomLoadFunc func(dec *json.Decoder) error    // used for reading custom 
 // Config stores configuration information for an editor.
 type Config struct {
 	SelectionTag         Tag             // the tag used for marking selection ranges
-	SelectionStyleFunc   TagStyleFunc    // style of the selection tag
-	HighlightTag         Tag             // for trasnient highlighting (usually has a different style than selection)
-	HighlightStyleFunc   TagStyleFunc    // style func for highlight
+	SelectionStyler      TagStyler       // style of the selection tag
+	HighlightTag         Tag             // for transient highlighting (usually has a different style than selection)
+	HighlightStyler      TagStyler       // style func for highlight
 	MarkTag              Tag             // template for the mark tags
 	MarkTags             []Tag           // a number of pre-configured tags used for marking text (default: 0..9 tags)
-	MarkStyleFunc        TagStyleFunc    // mark style func, using the tag index to distinguish marks
+	MarkStyler           TagStyler       // mark style func, using the tag index to distinguish marks
 	ErrorTag             Tag             // for errors
 	ParenErrorTag        Tag             // for wrong right parenthesis
-	ErrorStyleFunc       TagStyleFunc    // style of errors (default: theme error color)
+	ErrorStyler          TagStyler       // style of errors (default: theme error color)
 	ShowLineNumbers      bool            // switches on or off the line number display, which is in a separate grid
 	ShowWhitespace       bool            // show special glyphs for line endings (currently defunct)
 	BlendFG              BlendMode       // how layers of color are blended/composited for text foreground
@@ -111,20 +111,24 @@ func NewConfig() *Config {
 	z.BlendFG = BlendOverlay
 	z.BlendBG = BlendOverlay
 	z.SelectionTag = NewTag("selection")
-	z.SelectionStyleFunc = TagStyleFunc(func(tag Tag, c Cell) Cell {
-		fg := theme.TextColor()
-		bg := theme.SelectionColor()
-		if c.Style != EmptyStyle {
-			if c.Style.FGColor != nil {
-				fg = BlendColors(z.BlendFG, z.BlendFGSwitched, c.Style.FGColor, theme.ForegroundColor())
+	z.SelectionStyler = TagStyler{
+		TagName: z.SelectionTag.Name(),
+		StyleFunc: TagStyleFunc(func(tag Tag, c Cell) Cell {
+			fg := theme.TextColor()
+			bg := theme.SelectionColor()
+			if c.Style != EmptyStyle {
+				if c.Style.FGColor != nil {
+					fg = BlendColors(z.BlendFG, z.BlendFGSwitched, c.Style.FGColor, theme.ForegroundColor())
+				}
+				if c.Style.BGColor != nil {
+					bg = BlendColors(z.BlendBG, z.BlendBGSwitched, c.Style.BGColor, theme.SelectionColor())
+				}
 			}
-			if c.Style.BGColor != nil {
-				bg = BlendColors(z.BlendBG, z.BlendBGSwitched, c.Style.BGColor, theme.SelectionColor())
-			}
-		}
-		selStyle := Style{FGColor: fg, BGColor: bg}
-		return Cell{Rune: c.Rune, Style: selStyle}
-	})
+			selStyle := Style{FGColor: fg, BGColor: bg}
+			return Cell{Rune: c.Rune, Style: selStyle}
+		}),
+		DrawFullLine: true,
+	}
 	z.TagPreWrite = TagPreWriteFunc(func(tag TagWithInterval) error {
 		return nil
 	})
@@ -134,42 +138,50 @@ func NewConfig() *Config {
 	z.MaxLines = 1000000
 	z.MaxColumn = 1000000
 	z.HighlightTag = NewTag("highlight")
-	z.HighlightStyleFunc = TagStyleFunc(func(tag Tag, c Cell) Cell {
-		fg := theme.TextColor()
-		bg := theme.PrimaryColor()
-		if c.Style != EmptyStyle {
-			if c.Style.FGColor != nil {
-				fg = BlendColors(z.BlendFG, z.BlendFGSwitched, c.Style.FGColor, theme.ForegroundColor())
+	z.HighlightStyler = TagStyler{
+		TagName: z.HighlightTag.Name(),
+		StyleFunc: TagStyleFunc(func(tag Tag, c Cell) Cell {
+			fg := theme.TextColor()
+			bg := theme.PrimaryColor()
+			if c.Style != EmptyStyle {
+				if c.Style.FGColor != nil {
+					fg = BlendColors(z.BlendFG, z.BlendFGSwitched, c.Style.FGColor, theme.ForegroundColor())
+				}
+				if c.Style.BGColor != nil {
+					bg = BlendColors(z.BlendBG, z.BlendBGSwitched, c.Style.BGColor, theme.PrimaryColor())
+				}
 			}
-			if c.Style.BGColor != nil {
-				bg = BlendColors(z.BlendBG, z.BlendBGSwitched, c.Style.BGColor, theme.PrimaryColor())
+			selStyle := Style{FGColor: fg, BGColor: bg}
+			return Cell{
+				Rune:  c.Rune,
+				Style: selStyle,
 			}
-		}
-		selStyle := Style{FGColor: fg, BGColor: bg}
-		return Cell{
-			Rune:  c.Rune,
-			Style: selStyle,
-		}
-	})
+		}),
+		DrawFullLine: true,
+	}
 	z.ErrorTag = NewTag("error")
 	z.ParenErrorTag = z.ErrorTag.Clone(1)
-	z.ErrorStyleFunc = TagStyleFunc(func(tag Tag, c Cell) Cell {
-		fg := theme.TextColor()
-		bg := theme.ErrorColor()
-		if c.Style != EmptyStyle {
-			if c.Style.FGColor != nil {
-				fg = BlendColors(z.BlendFG, z.BlendFGSwitched, c.Style.FGColor, theme.TextColor())
+	z.ErrorStyler = TagStyler{
+		TagName: z.ErrorTag.Name(),
+		StyleFunc: TagStyleFunc(func(tag Tag, c Cell) Cell {
+			fg := theme.TextColor()
+			bg := theme.ErrorColor()
+			if c.Style != EmptyStyle {
+				if c.Style.FGColor != nil {
+					fg = BlendColors(z.BlendFG, z.BlendFGSwitched, c.Style.FGColor, theme.TextColor())
+				}
+				if c.Style.BGColor != nil {
+					bg = BlendColors(z.BlendBG, z.BlendBGSwitched, c.Style.BGColor, theme.ErrorColor())
+				}
 			}
-			if c.Style.BGColor != nil {
-				bg = BlendColors(z.BlendBG, z.BlendBGSwitched, c.Style.BGColor, theme.ErrorColor())
+			selStyle := Style{FGColor: fg, BGColor: bg}
+			return Cell{
+				Rune:  c.Rune,
+				Style: selStyle,
 			}
-		}
-		selStyle := Style{FGColor: fg, BGColor: bg}
-		return Cell{
-			Rune:  c.Rune,
-			Style: selStyle,
-		}
-	})
+		}),
+		DrawFullLine: true,
+	}
 	z.LineWrap = true
 	z.SoftWrap = true
 	z.HardLF = ' '
@@ -290,12 +302,9 @@ func NewEditorWithConfig(columns, lines int, c fyne.Canvas, config *Config) *Edi
 	z.border = container.NewBorder(nil, nil, z.lineNumberGrid, z.scroll, z.grid)
 	z.content = container.New(layout.NewStackLayout(), z.background, z.border)
 	// selection styler
-	z.Styles.AddStyler(TagStyler{TagName: z.Config.SelectionTag.Name(),
-		StyleFunc: z.Config.SelectionStyleFunc, DrawFullLine: true})
-	z.Styles.AddStyler(TagStyler{TagName: z.Config.HighlightTag.Name(),
-		StyleFunc: z.Config.HighlightStyleFunc, DrawFullLine: true})
-	z.Styles.AddStyler(TagStyler{TagName: z.Config.ErrorTag.Name(),
-		StyleFunc: z.Config.ErrorStyleFunc, DrawFullLine: false})
+	z.Styles.AddStyler(z.Config.SelectionStyler)
+	z.Styles.AddStyler(z.Config.HighlightStyler)
+	z.Styles.AddStyler(z.Config.ErrorStyler)
 	// mark color and style
 
 	col0, _ := colorful.MakeColor(color.RGBA{210, 245, 60, 255})
@@ -368,7 +377,7 @@ func (z *Editor) SetLineNumberStyle(style Style) {
 	z.lineNumberStyle = style
 }
 
-// SetTopLine sets the zgrid to display starting with the given line number.
+// SetTopLine sets the editor to display starting with the given line number.
 func (z *Editor) SetTopLine(x int) {
 	z.lineOffset = x
 	if z.scroll != nil {
