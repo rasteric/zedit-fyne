@@ -8,7 +8,6 @@ import (
 	"strconv"
 	"sync"
 
-	"fyne.io/fyne/v2/widget"
 	"github.com/lindell/go-ordered-set/orderedset"
 	"github.com/rdleal/intervalst/interval"
 )
@@ -21,7 +20,7 @@ const (
 )
 
 type TagFunc func(evt TagEvent, tag Tag, interval CharInterval)
-type TagStyleFunc func(tag Tag, c widget.TextGridCell) widget.TextGridCell
+type TagStyleFunc func(tag Tag, c Cell) Cell
 type CustomTagUnmarshallerFunc func(typeName string, in []byte) (Tag, error)
 
 // CustomTagUnmarshaller should be set to a function that takes the type name and []byte,

@@ -111,22 +111,19 @@ func NewConfig() *Config {
 	z.BlendFG = BlendOverlay
 	z.BlendBG = BlendOverlay
 	z.SelectionTag = NewTag("selection")
-	z.SelectionStyleFunc = TagStyleFunc(func(tag Tag, c widget.TextGridCell) widget.TextGridCell {
+	z.SelectionStyleFunc = TagStyleFunc(func(tag Tag, c Cell) Cell {
 		fg := theme.TextColor()
 		bg := theme.SelectionColor()
-		if c.Style != nil {
-			if c.Style.TextColor() != nil {
-				fg = BlendColors(z.BlendFG, z.BlendFGSwitched, c.Style.TextColor(), theme.ForegroundColor())
+		if c.Style != EmptyStyle {
+			if c.Style.FGColor != nil {
+				fg = BlendColors(z.BlendFG, z.BlendFGSwitched, c.Style.FGColor, theme.ForegroundColor())
 			}
-			if c.Style.BackgroundColor() != nil {
-				bg = BlendColors(z.BlendBG, z.BlendBGSwitched, c.Style.BackgroundColor(), theme.SelectionColor())
+			if c.Style.BGColor != nil {
+				bg = BlendColors(z.BlendBG, z.BlendBGSwitched, c.Style.BGColor, theme.SelectionColor())
 			}
 		}
-		selStyle := &widget.CustomTextGridStyle{FGColor: fg, BGColor: bg}
-		return widget.TextGridCell{
-			Rune:  c.Rune,
-			Style: selStyle,
-		}
+		selStyle := Style{FGColor: fg, BGColor: bg}
+		return Cell{Rune: c.Rune, Style: selStyle}
 	})
 	z.TagPreWrite = TagPreWriteFunc(func(tag TagWithInterval) error {
 		return nil
@@ -137,38 +134,38 @@ func NewConfig() *Config {
 	z.MaxLines = 1000000
 	z.MaxColumn = 1000000
 	z.HighlightTag = NewTag("highlight")
-	z.HighlightStyleFunc = TagStyleFunc(func(tag Tag, c widget.TextGridCell) widget.TextGridCell {
+	z.HighlightStyleFunc = TagStyleFunc(func(tag Tag, c Cell) Cell {
 		fg := theme.TextColor()
 		bg := theme.PrimaryColor()
-		if c.Style != nil {
-			if c.Style.TextColor() != nil {
-				fg = BlendColors(z.BlendFG, z.BlendFGSwitched, c.Style.TextColor(), theme.ForegroundColor())
+		if c.Style != EmptyStyle {
+			if c.Style.FGColor != nil {
+				fg = BlendColors(z.BlendFG, z.BlendFGSwitched, c.Style.FGColor, theme.ForegroundColor())
 			}
-			if c.Style.BackgroundColor() != nil {
-				bg = BlendColors(z.BlendBG, z.BlendBGSwitched, c.Style.BackgroundColor(), theme.PrimaryColor())
+			if c.Style.BGColor != nil {
+				bg = BlendColors(z.BlendBG, z.BlendBGSwitched, c.Style.BGColor, theme.PrimaryColor())
 			}
 		}
-		selStyle := &widget.CustomTextGridStyle{FGColor: fg, BGColor: bg}
-		return widget.TextGridCell{
+		selStyle := Style{FGColor: fg, BGColor: bg}
+		return Cell{
 			Rune:  c.Rune,
 			Style: selStyle,
 		}
 	})
 	z.ErrorTag = NewTag("error")
 	z.ParenErrorTag = z.ErrorTag.Clone(1)
-	z.ErrorStyleFunc = TagStyleFunc(func(tag Tag, c widget.TextGridCell) widget.TextGridCell {
+	z.ErrorStyleFunc = TagStyleFunc(func(tag Tag, c Cell) Cell {
 		fg := theme.TextColor()
 		bg := theme.ErrorColor()
-		if c.Style != nil {
-			if c.Style.TextColor() != nil {
-				fg = BlendColors(z.BlendFG, z.BlendFGSwitched, c.Style.TextColor(), theme.TextColor())
+		if c.Style != EmptyStyle {
+			if c.Style.FGColor != nil {
+				fg = BlendColors(z.BlendFG, z.BlendFGSwitched, c.Style.FGColor, theme.TextColor())
 			}
-			if c.Style.BackgroundColor() != nil {
-				bg = BlendColors(z.BlendBG, z.BlendBGSwitched, c.Style.BackgroundColor(), theme.ErrorColor())
+			if c.Style.BGColor != nil {
+				bg = BlendColors(z.BlendBG, z.BlendBGSwitched, c.Style.BGColor, theme.ErrorColor())
 			}
 		}
-		selStyle := &widget.CustomTextGridStyle{FGColor: fg, BGColor: bg}
-		return widget.TextGridCell{
+		selStyle := Style{FGColor: fg, BGColor: bg}
+		return Cell{
 			Rune:  c.Rune,
 			Style: selStyle,
 		}
@@ -331,9 +328,9 @@ func NewEditorWithConfig(columns, lines int, c fyne.Canvas, config *Config) *Edi
 		}
 	}
 
-	markStyler := TagStyleFunc(func(tag Tag, c widget.TextGridCell) widget.TextGridCell {
-		selStyle := &widget.CustomTextGridStyle{FGColor: theme.ForegroundColor(), BGColor: markColors[tag.Index()%10]}
-		return widget.TextGridCell{
+	markStyler := TagStyleFunc(func(tag Tag, c Cell) Cell {
+		selStyle := Style{FGColor: theme.ForegroundColor(), BGColor: markColors[tag.Index()%10]}
+		return Cell{
 			Rune:  c.Rune,
 			Style: selStyle,
 		}
@@ -2242,7 +2239,7 @@ func (z *Editor) maybeStyleRange(tag Tag, interval CharInterval, styler TagStyle
 		for j := range z.Columns {
 			xj := j + z.columnOffset
 			if interval.Contains(CharPos{Line: xi, Column: xj}) {
-				z.grid.Rows[i].Cells[j] = styler(tag, z.grid.Rows[i].Cells[j])
+				z.grid.Rows[i].Cells[j] = styler(tag, NewCellFromTextGridCell(z.grid.Rows[i].Cells[j])).ToTextGridCell()
 			}
 		}
 	}
