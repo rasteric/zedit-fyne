@@ -2562,7 +2562,7 @@ func IsQuotationMark(c rune) bool {
 	}
 }
 
-// MakeKeyboardShortcutKey makes a lookup key for a fyne.KeyboardShortcut that is equal
+// GetKeyboardShortcutKey makes a lookup key for a fyne.KeyboardShortcut that is equal
 // for any two shortcuts with the same key and modifier. (The shortcut name does not have this
 // property.)
 func GetKeyboardShortcutKey(s fyne.KeyboardShortcut) string {
