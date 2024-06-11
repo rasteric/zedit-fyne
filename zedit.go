@@ -56,6 +56,14 @@ const (
 	CaretPageUp
 )
 
+type EditorEvent int
+
+const (
+	CaretMoveEvent EditorEvent = iota + 1
+)
+
+type EventHandler func(evt EditorEvent, editor *Editor) // used for editor events
+
 type TagPreWriteFunc func(tag TagWithInterval) error // used before a tag is written
 type TagPostReadFunc func(tag TagWithInterval) error // used after a tag has been read
 type CustomSaveFunc func(enc *json.Encoder) error    // used for writing custom data during Save()
@@ -221,6 +229,7 @@ type Editor struct {
 	Config  *Config         // editor configuration
 
 	// internal fields
+	eventHandlers        map[EditorEvent]EventHandler
 	caretPos             CharPos
 	caretState           uint32
 	hasCaretBlinking     uint32
@@ -273,6 +282,7 @@ func NewEditorWithConfig(columns, lines int, c fyne.Canvas, config *Config) *Edi
 	z.canvas = c
 	z.grid = widget.NewTextGrid()
 	z.initInternalGrid()
+	z.eventHandlers = make(map[EditorEvent]EventHandler)
 	z.shortcuts = make(map[string]fyne.KeyboardShortcut)
 	z.handlers = make(map[string]func(z *Editor))
 	z.keyHandlers = make(map[fyne.KeyName]func(z *Editor))
@@ -349,6 +359,20 @@ func NewEditorWithConfig(columns, lines int, c fyne.Canvas, config *Config) *Edi
 	z.BlinkCaret(true)
 	z.addDefaultShortcuts()
 	return &z
+}
+
+// SetEventHandler sets the event handler for the given editor event.
+func (z *Editor) SetEventHandler(event EditorEvent, handler EventHandler) {
+	z.mutex.Lock()
+	defer z.mutex.Unlock()
+	z.eventHandlers[event] = handler
+}
+
+// RemoveEventhandler removes the editor event. If it wasn't added beforehand, the function has no effect.
+func (z *Editor) RemoveEventHandler(event EditorEvent) {
+	z.mutex.Lock()
+	defer z.mutex.Unlock()
+	delete(z.eventHandlers, event)
 }
 
 // adjustScroll adjusts the internal spacer of the scroll bar. This method must be called after each
