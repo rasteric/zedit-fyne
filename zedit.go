@@ -1344,6 +1344,10 @@ func (z *Editor) SetCaret(pos CharPos) {
 
 	// handle caret enter event
 	z.handleCaretEvent(CaretEnterEvent, pos, oldPos)
+	// handle caret move event
+	if handler, ok := z.eventHandlers[CaretMoveEvent]; ok && handler != nil {
+		handler(CaretMoveEvent, z)
+	}
 }
 
 func (z *Editor) maybeHighlightParen() {
