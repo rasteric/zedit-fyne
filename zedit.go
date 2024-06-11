@@ -99,7 +99,7 @@ type Config struct {
 	CustomLoader         CustomLoadFunc  // called during Load after the editor has loaded everything else
 	CustomSaver          CustomSaveFunc  // called after during Save everything else has been saved
 	MaxLines             int64           // maximum number of lines (if 0 or below, no limit) only used during Load
-	MaxColumn            int64           // maximum column length (if 0 or below, no limit) only used during Load
+	MaxColumns           int64           // maximum column length (if 0 or below, no limit) only used during Load
 	MaxTags              int64           // maximum number of tags (if 0 or below, no limit) only used during Load
 	MaxPrintLines        int             // maximum number of lines for printing for console mode, preceding lines are cut off
 }
@@ -136,7 +136,7 @@ func NewConfig() *Config {
 		return nil
 	})
 	z.MaxLines = 1000000
-	z.MaxColumn = 1000000
+	z.MaxColumns = 1000000
 	z.HighlightTag = NewTag("highlight")
 	z.HighlightStyler = TagStyler{
 		TagName: z.HighlightTag.Name(),
