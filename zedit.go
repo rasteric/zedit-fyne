@@ -457,6 +457,9 @@ func (z *Editor) FindParagraphStart(row int, lf rune) int {
 	if row <= 0 {
 		return 0
 	}
+	if row > z.LastLine() {
+		return z.FindParagraphStart(z.LastLine(), lf)
+	}
 	k := len(z.Rows[row-1])
 	if k == 0 {
 		return row
@@ -793,23 +796,25 @@ func (z *Editor) GetText() string {
 	return sb.String()
 }
 
-// Print prints a string at the current cursor position, advancing the cursor
-// and applying the given tags to the string. The string may have multiple lines.
+// Print prints a string at the end of the buffer. The string may have multiple lines.
 // This method is for console mode applications and should not be used for user editing.
 // If config.MaxPrintLines is exceeded, lines are cut off at the beginning of the
 // buffer.
 func (z *Editor) Print(s string, tags []Tag) {
+	z.MoveCaret(CaretEnd)
 	lines := strings.Split(s, "\n")
 	for _, line := range lines {
 		pos := z.caretPos
 		r := []rune(line)
 		z.Insert(r, pos)
 		if tags != nil {
-			pos2 := z.caretPos
+			pos2 := z.LastPos()
 			z.Tags.Add(CharInterval{Start: pos, End: pos2}, tags...)
 		}
+		z.SetCaret(z.LastPos())
 		z.Return()
 	}
+	z.MoveCaret(CaretEnd)
 }
 
 // wrapLine word wraps a line of runes according to the editor settings for soft wrapping.
@@ -1327,6 +1332,7 @@ func (z *Editor) GetCaret() CharPos {
 // SetCaret sets the current caret position, taking care of paren highlighting
 // and caret events but without scrolling or refreshing the display.
 func (z *Editor) SetCaret(pos CharPos) {
+	pos = MinPos(pos, z.LastPos())
 	// handle caret leave event
 	z.handleCaretEvent(CaretLeaveEvent, z.caretPos, pos)
 
@@ -1535,11 +1541,11 @@ func (z *Editor) MoveCaret(dir CaretMovement) {
 		z.caretPos = newPos
 		z.SetTopLine(0)
 	case CaretEnd:
-		newTop := z.LastLine() - z.Lines + 1
-		z.SetTopLine(newTop)
 		newPos = CharPos{Line: z.LastLine(), Column: z.LastColumn(z.LastLine())}
 		z.handleCaretEvent(CaretLeaveEvent, oldPos, newPos)
 		z.caretPos = newPos
+		newTop := max(0, z.LastLine()-z.Lines+1)
+		z.SetTopLine(newTop)
 	case CaretLineStart:
 		newPos = CharPos{Line: z.caretPos.Line, Column: 0}
 		if z.columnOffset > 0 {
@@ -1595,6 +1601,10 @@ func (z *Editor) MoveCaret(dir CaretMovement) {
 // hardLF and softLF as hard and soft line feed characters. The cursor position and tags
 // are updated automatically by this method.
 func (z *Editor) Insert(r []rune, pos CharPos) {
+	if CmpPos(pos, z.LastPos()) > 0 {
+		pos = z.LastPos()
+		z.SetCaret(pos)
+	}
 	startRow := z.FindParagraphStart(pos.Line, z.Config.HardLF)
 	endRow := z.FindParagraphEnd(pos.Line, z.Config.HardLF)
 	// endRowLastColumn := len(z.Rows[endRow].Cells) - 1
@@ -1710,6 +1720,10 @@ func (z *Editor) adjustTagLines(tags []Tag, lineDelta int, insertPos CharPos) {
 func (z *Editor) Delete(fromTo CharInterval) {
 	z.RemoveSelection()
 	fromTo = fromTo.Sanitize(z.LastPos())
+	if CmpPos(fromTo.End, z.LastPos()) == 0 {
+		prev, _ := z.PrevPos(z.LastPos())
+		fromTo.End = prev
+	}
 
 	// We look up the tags starting at or after the deletion start position.
 	tags, ok := z.Tags.LookupRange(z.ToEnd(fromTo.Start))
