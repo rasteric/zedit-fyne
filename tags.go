@@ -408,6 +408,22 @@ func (c *StyleContainer) AddStyler(styler TagStyler) {
 	c.stylers = append(c.stylers, styler)
 }
 
+// HasStyler returns true if the container has a styler with the given tag name, false otherwise.
+// This operation is currently slow with complexity O(n). TODO Optimize
+func (c *StyleContainer) HasStyler(tagName string) bool {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	if c.stylers == nil {
+		return false
+	}
+	for i := range c.stylers {
+		if c.stylers[i].TagName == tagName {
+			return true
+		}
+	}
+	return false
+}
+
 // RemoveStyler removes a tag styler from the container.
 func (c *StyleContainer) RemoveStyler(tag Tag) {
 	c.mutex.Lock()

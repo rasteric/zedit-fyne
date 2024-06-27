@@ -60,6 +60,7 @@ type EditorEvent int
 
 const (
 	CaretMoveEvent EditorEvent = iota + 1
+	WordChangeEvent
 )
 
 type EventHandler func(evt EditorEvent, editor *Editor) // used for editor events
@@ -110,6 +111,7 @@ type Config struct {
 	MaxColumns           int64           // maximum column length (if 0 or below, no limit) only used during Load
 	MaxTags              int64           // maximum number of tags (if 0 or below, no limit) only used during Load
 	MaxPrintLines        int             // maximum number of lines for printing for console mode, preceding lines are cut off
+	GetWordAtLeft        bool            // if true, word-change event triggers any word left of the caret if the caret is not on a word
 }
 
 // NewConfig returns a new config with default values.
@@ -207,7 +209,7 @@ func NewConfig() *Config {
 	for i := range z.MarkTags {
 		z.MarkTags[i] = z.MarkTag.Clone(i)
 		z.MarkTags[i].SetCallback(func(evt TagEvent, tag Tag, interval CharInterval) {
-			log.Printf("Event: %v Mark: %v Interval: %v\n", evt, tag.Index(), interval)
+			// log.Printf("Event: %v Mark: %v Interval: %v\n", evt, tag.Index(), interval)
 		})
 	}
 	z.ParagraphLineNumbers = true
@@ -256,6 +258,7 @@ type Editor struct {
 	handlers             map[string]func(z *Editor)
 	keyHandlers          map[fyne.KeyName]func(z *Editor)
 	canvas               fyne.Canvas
+	currentWord          string
 	// delayed refresh
 	refresher     func()
 	lastRefreshed time.Time
@@ -276,8 +279,6 @@ func NewEditor(columns, lines int, c fyne.Canvas) *Editor {
 func NewEditorWithConfig(columns, lines int, c fyne.Canvas, config *Config) *Editor {
 	z := Editor{Lines: lines, Columns: columns + 1, grid: widget.NewTextGrid()}
 	z.Config = config
-	bgcolor := BlendColors(BlendColor, true, theme.TextColor(), theme.PrimaryColor())
-	fgcolor := theme.BackgroundColor()
 	z.Styles = NewStyleContainer()
 	z.canvas = c
 	z.grid = widget.NewTextGrid()
@@ -292,10 +293,13 @@ func NewEditorWithConfig(columns, lines int, c fyne.Canvas, config *Config) *Edi
 	_, z.caretBlinkCancel = context.WithCancel(context.Background())
 	z.invertedDefaultStyle = Style{FGColor: theme.InputBackgroundColor(), BGColor: theme.ForegroundColor()}
 	z.defaultStyle = Style{FGColor: theme.ForegroundColor(), BGColor: theme.InputBackgroundColor()}
+	bgcolor := BlendColors(BlendColor, true, theme.TextColor(), theme.FocusColor())
+	fgcolor := theme.BackgroundColor()
 	z.lineNumberStyle = Style{FGColor: fgcolor, BGColor: bgcolor}
-	z.background = canvas.NewRectangle(theme.InputBackgroundColor()) //theme.InputBackgroundColor())
-	z.background.StrokeColor = theme.FocusColor()
-	z.background.StrokeWidth = 4
+	z.background = canvas.NewRectangle(theme.InputBackgroundColor())
+	z.background.StrokeColor = theme.InputBorderColor()
+	z.background.StrokeWidth = theme.InputBorderSize()
+	z.background.CornerRadius = theme.InputRadiusSize()
 	z.lineNumberGrid = widget.NewTextGrid()
 	z.charSize = fyne.MeasureText("M", theme.TextSize(), fyne.TextStyle{Monospace: true})
 
@@ -359,6 +363,93 @@ func NewEditorWithConfig(columns, lines int, c fyne.Canvas, config *Config) *Edi
 	z.BlinkCaret(true)
 	z.addDefaultShortcuts()
 	return &z
+}
+
+// MakeOrGetColorTag creates or returns a tag for a given color. This method avoids duplicating tags
+// and adds an adequate style function for the tag that changes the color. It does define any payload or
+// callback. A color tag has the name "color-R-G-B-A-F" where R is decimal red, G decimal green, B is decimal
+// blue, A is decimal alpha and F is "true" if the color is for background, "false" otherwise. So, you shouldn't
+// use this name scheme for other tags if you plan to use pre-defined color tags. drawFullLine is passed
+// to the styler's DrawFullLine field.
+func (z *Editor) MakeOrGetColorTag(c color.Color, background, drawFullLine bool) Tag {
+	r, g, b, a := c.RGBA()
+	name := fmt.Sprintf("_color-%v,%v,%v,%v-%v", r, g, b, a, background)
+	tag := z.Tags.CloneTag(NewTag(name))
+	if z.Styles.HasStyler(name) {
+		return tag
+	}
+	cStyler := TagStyleFunc(func(tag Tag, cell Cell) Cell {
+		if background {
+			cell.Style.BGColor = c
+		} else {
+			cell.Style.FGColor = c
+		}
+		return cell
+	})
+	z.Styles.AddStyler(TagStyler{TagName: name, StyleFunc: cStyler, DrawFullLine: drawFullLine})
+	return tag
+}
+
+// getWordAt obtains the word under the given position or just before the position.
+// TODO Performance: We might want to avoid string conatenation here, or introduce a maximum word length.
+func (z *Editor) getWordAt(pos CharPos) string {
+	c, ok := z.CharAt(pos)
+	if !ok {
+		return ""
+	}
+	var s string
+	searchRight := false
+	if !IsWordRune(c) {
+		if !z.Config.GetWordAtLeft {
+			return "" // pos is not in a word, so return
+		}
+		s = "" // continue, since there might be a word left of pos
+	} else {
+		s = string(c)
+		searchRight = true // we're on a word, so search left and right for boundaries
+	}
+	pl := pos
+	for {
+		pl, ok = z.PrevPos(pl)
+		if !ok {
+			break
+		}
+		if c, ok := z.CharAt(pl); ok {
+			if c == z.Config.SoftLF {
+				continue
+			}
+			if IsWordRune(c) {
+				s = string(c) + s
+			} else {
+				break
+			}
+		} else {
+			break
+		}
+	}
+	if !searchRight {
+		return s
+	}
+	pr := pos
+	for {
+		pr, ok = z.NextPos(pr)
+		if !ok {
+			break
+		}
+		if c, ok := z.CharAt(pr); ok {
+			if c == z.Config.SoftLF {
+				continue
+			}
+			if IsWordRune(c) {
+				s = s + string(c)
+			} else {
+				break
+			}
+		} else {
+			break
+		}
+	}
+	return s
 }
 
 // SetEventHandler sets the event handler for the given editor event.
@@ -550,7 +641,7 @@ func (z *Editor) ScrollLeft(n int) {
 // FocusGained implements a Focusable.
 func (z *Editor) FocusGained() {
 	z.hasFocus = true
-	z.background.StrokeColor = theme.FocusColor()
+	z.background.StrokeColor = theme.PrimaryColor()
 	z.background.Refresh()
 	z.Refresh()
 }
@@ -558,7 +649,7 @@ func (z *Editor) FocusGained() {
 // FocusLost implements a Focusable.
 func (z *Editor) FocusLost() {
 	z.hasFocus = false
-	z.background.StrokeColor = theme.BackgroundColor()
+	z.background.StrokeColor = theme.InputBorderColor()
 	z.background.Refresh()
 	z.Refresh()
 }
@@ -747,11 +838,11 @@ func (z *Editor) GetLineText(row int) string {
 
 func (z *Editor) MinSize() fyne.Size {
 	if !z.Config.ShowLineNumbers {
-		return fyne.Size{Width: float32(z.Columns) * z.charSize.Width,
-			Height: float32(z.Lines) * z.charSize.Height}
+		return fyne.Size{Width: float32(z.Columns)*z.charSize.Width + 2*theme.InnerPadding(),
+			Height: float32(z.Lines)*z.charSize.Height + 2*theme.InnerPadding()}
 	}
-	return fyne.Size{Width: float32(z.lineNumberLen())*z.charSize.Width + float32(z.Columns)*z.charSize.Width,
-		Height: float32(z.Lines) * z.charSize.Height}
+	return fyne.Size{Width: float32(z.lineNumberLen())*z.charSize.Width + float32(z.Columns)*z.charSize.Width + 2*theme.InnerPadding(),
+		Height: float32(z.Lines)*z.charSize.Height + 2*theme.InnerPadding()}
 }
 
 // SetText sets the text in the editor to the given string, removing all tags in the process.
@@ -774,6 +865,7 @@ func (z *Editor) SetText(s string) {
 			z.maxLineLen = len(z.Rows[len(z.Rows)-1])
 		}
 	}
+	z.maybeHandleWordChangeEvent(z.caretPos)
 	z.Refresh()
 }
 
@@ -796,25 +888,27 @@ func (z *Editor) GetText() string {
 	return sb.String()
 }
 
-// Print prints a string at the end of the buffer. The string may have multiple lines.
+// Print prints a string at end of the buffer. The string may have multiple lines.
 // This method is for console mode applications and should not be used for user editing.
 // If config.MaxPrintLines is exceeded, lines are cut off at the beginning of the
 // buffer.
 func (z *Editor) Print(s string, tags []Tag) {
+	var pos, pos2 CharPos
 	z.MoveCaret(CaretEnd)
+	pos = z.caretPos
 	lines := strings.Split(s, "\n")
-	for _, line := range lines {
-		pos := z.caretPos
+	for i, line := range lines {
 		r := []rune(line)
 		z.Insert(r, pos)
-		if tags != nil {
-			pos2 := z.LastPos()
-			z.Tags.Add(CharInterval{Start: pos, End: pos2}, tags...)
-		}
 		z.SetCaret(z.LastPos())
-		z.Return()
+		pos2 = z.caretPos
+		if i < len(lines)-1 {
+			z.Return()
+		}
 	}
-	z.MoveCaret(CaretEnd)
+	if tags != nil {
+		z.Tags.Add(CharInterval{Start: pos, End: pos2}, tags...)
+	}
 }
 
 // wrapLine word wraps a line of runes according to the editor settings for soft wrapping.
@@ -1350,10 +1444,30 @@ func (z *Editor) SetCaret(pos CharPos) {
 
 	// handle caret enter event
 	z.handleCaretEvent(CaretEnterEvent, pos, oldPos)
+	z.maybeHandleWordChangeEvent(pos)
 	// handle caret move event
 	if handler, ok := z.eventHandlers[CaretMoveEvent]; ok && handler != nil {
 		handler(CaretMoveEvent, z)
 	}
+}
+
+// maybeHandleWordChangeEvent calls the WordChangeEvent handler if one is installed
+// and the word at pos has changed from the word available from CurrentWord().
+func (z *Editor) maybeHandleWordChangeEvent(pos CharPos) {
+	handler, ok := z.eventHandlers[WordChangeEvent]
+	if !ok || handler == nil {
+		return
+	}
+	word := z.getWordAt(pos)
+	if word != z.currentWord {
+		z.currentWord = word
+		handler(WordChangeEvent, z)
+	}
+}
+
+// CurrentWord returns the current word under the caret, "" is there is none.
+func (z *Editor) CurrentWord() string {
+	return z.currentWord
 }
 
 func (z *Editor) maybeHighlightParen() {
@@ -1483,6 +1597,7 @@ func (z *Editor) MoveCaret(dir CaretMovement) {
 	oldPos := z.caretPos
 	defer func(oldPos CharPos) {
 		z.handleCaretEvent(CaretEnterEvent, z.caretPos, oldPos)
+		z.maybeHandleWordChangeEvent(z.caretPos)
 	}(oldPos)
 	var newPos CharPos
 	switch dir {
@@ -1728,7 +1843,7 @@ func (z *Editor) Delete(fromTo CharInterval) {
 	// We look up the tags starting at or after the deletion start position.
 	tags, ok := z.Tags.LookupRange(z.ToEnd(fromTo.Start))
 	if !ok {
-		log.Println("NO TAG FOUND")
+		// log.Println("NO TAG FOUND")
 	}
 	// The tags are now adjusted for the deletion interval (many cases to consider). Word wrapping is handled separately.
 	if ok {
@@ -1828,6 +1943,11 @@ func (z *Editor) ToEnd(start CharPos) CharInterval {
 	return CharInterval{Start: start, End: z.LastPos()}
 }
 
+// DeleteAll deletes all text.
+func (z *Editor) DeleteAll() {
+	z.Delete(z.ToEnd(CharPos{}))
+}
+
 // LastPos returns the last char position in the buffer.
 func (z *Editor) LastPos() CharPos {
 	return CharPos{Line: len(z.Rows) - 1, Column: len(z.Rows[len(z.Rows)-1]) - 1}
@@ -1859,7 +1979,7 @@ func (z *Editor) PrevPos(pos CharPos) (CharPos, bool) {
 func (z *Editor) maybeAdjustTagIntervalForDelete(tag Tag, interval, fromTo CharInterval) {
 	// Case 4: fromTo is strictly after interval => Do nothing.
 	if CmpPos(fromTo.Start, interval.End) > 0 {
-		log.Println("CASE 4")
+		// log.Println("CASE 4")
 		return
 	}
 	lineDelta := fromTo.End.Line - fromTo.Start.Line
@@ -1870,19 +1990,19 @@ func (z *Editor) maybeAdjustTagIntervalForDelete(tag Tag, interval, fromTo CharI
 		columnDelta++
 	}
 	columnDelta = -columnDelta
-	log.Println(columnDelta)
+	// log.Println(columnDelta)
 	if CmpPos(fromTo.End, interval.Start) < 0 {
 		// Cases 5 and 6.
 		if fromTo.End.Line < interval.Start.Line {
 			// Case 6: We shift the interval by lineDelta, no other changes needed.
-			log.Println("CASE 6")
+			// log.Println("CASE 6")
 			newInterval := CharInterval{Start: CharPos{Line: interval.Start.Line + lineDelta, Column: interval.Start.Column},
 				End: CharPos{Line: interval.End.Line + lineDelta, Column: interval.End.Column}}
 			z.Tags.Upsert(tag, newInterval)
 			return
 		}
 		// Case 5: We shift the interval by lineDelta but also have to shift the start column.
-		log.Println("CASE 5")
+		// log.Println("CASE 5")
 		var newInterval CharInterval
 		diff1 := interval.Start.Column - fromTo.End.Column
 		if interval.Start.Line == interval.End.Line {
@@ -1899,14 +2019,14 @@ func (z *Editor) maybeAdjustTagIntervalForDelete(tag Tag, interval, fromTo CharI
 	}
 	if CmpPos(fromTo.Start, interval.Start) <= 0 && CmpPos(fromTo.End, interval.End) >= 0 {
 		// Case 3: We can delete the tag, because the entire interval is being deleted.
-		log.Println("CASE 3")
+		// log.Println("CASE 3")
 		z.Tags.Delete(tag)
 		return
 	}
 	if CmpPos(fromTo.Start, interval.Start) >= 0 && CmpPos(fromTo.End, interval.End) <= 0 {
 		// Case 1: The deletion interval is within the interval. (Note: Exact equality already handled above.)
 		// Only the end column has to be adjusted. Whatever is deleted in the start line does not affect the interval.
-		log.Println("CASE 1")
+		// log.Println("CASE 1")
 		if fromTo.End.Line != interval.End.Line {
 			columnDelta = 0
 		}
@@ -1922,7 +2042,7 @@ func (z *Editor) maybeAdjustTagIntervalForDelete(tag Tag, interval, fromTo CharI
 	}
 	if CmpPos(fromTo.Start, interval.Start) < 0 {
 		// Case 2: The new interval starts at fromTo.Start. We may need to adjust the end column and need to subtract lineDelta.
-		log.Println("CASE 2")
+		// log.Println("CASE 2")
 		if fromTo.End.Line != interval.End.Line {
 			columnDelta = 0
 		}
@@ -1933,7 +2053,7 @@ func (z *Editor) maybeAdjustTagIntervalForDelete(tag Tag, interval, fromTo CharI
 	}
 	if CmpPos(fromTo.Start, interval.Start) >= 0 && CmpPos(fromTo.End, interval.End) > 0 {
 		// Case 7: Adjust by lineDelta and the new column will be fromTo. Start.
-		log.Println("CASE 7")
+		// log.Println("CASE 7")
 		newInterval := CharInterval{Start: interval.Start, End: fromTo.Start}
 		z.Tags.Upsert(tag, newInterval)
 		return
@@ -2312,16 +2432,34 @@ type zgridRenderer struct {
 func (r *zgridRenderer) Destroy() {}
 
 func (r *zgridRenderer) Layout(size fyne.Size) {
-	s := r.zgrid.MinSize()
-	r.zgrid.border.Resize(fyne.Size{Width: s.Width - theme.Padding(), Height: s.Height})
-	r.zgrid.border.Move(fyne.Position{X: theme.Padding(), Y: theme.Padding()})
-	r.zgrid.scroll.Resize(fyne.Size{Width: theme.ScrollBarSize(), Height: r.zgrid.grid.MinSize().Height})
-	r.zgrid.scroll.Move(fyne.Position{X: s.Width - theme.ScrollBarSize() - theme.Padding(), Y: theme.Padding() / 2})
-	r.zgrid.background.Resize(fyne.Size{Width: s.Width + theme.Padding(), Height: s.Height - theme.Padding()})
+	r.zgrid.background.Resize(size)
+	if !r.zgrid.Config.ShowLineNumbers {
+		r.zgrid.grid.Move(fyne.Position{X: theme.InnerPadding(), Y: theme.InnerPadding()})
+		return
+	}
+	r.zgrid.lineNumberGrid.Move(fyne.Position{X: theme.InnerPadding() / 2,
+		Y: theme.InnerPadding()})
+	r.zgrid.grid.Move(fyne.Position{
+		X: r.zgrid.lineNumberGrid.Position().X + r.zgrid.lineNumberGrid.Size().Width + theme.InnerPadding()/2,
+		Y: theme.InnerPadding(),
+	})
+	r.zgrid.scroll.Resize(fyne.Size{Width: theme.ScrollBarSize(), Height: r.zgrid.background.Size().Height})
+	r.zgrid.scroll.Move(fyne.Position{X: r.zgrid.Size().Width - theme.ScrollBarSize(), Y: 0})
+	// r.zgrid.border.Resize(fyne.Size{
+	// 	Width:  size.Width - 2*theme.Padding(),
+	// 	Height: size.Height - 2*theme.Padding(),
+	// })
+	// s := r.zgrid.MinSize()
+	// r.zgrid.border.Resize(fyne.Size{Width: s.Width - theme.Padding(), Height: s.Height})
+	// r.zgrid.border.Move(fyne.Position{X: theme.Padding(), Y: theme.Padding()})
+	// r.zgrid.scroll.Resize(fyne.Size{Width: theme.ScrollBarSize(), Height: r.zgrid.grid.MinSize().Height})
+	// r.zgrid.scroll.Move(fyne.Position{X: s.Width - theme.ScrollBarSize() - theme.Padding(), Y: theme.Padding() / 2})
+	// r.zgrid.background.Resize(fyne.Size{Width: s.Width + theme.Padding(), Height: s.Height - theme.Padding()})
 }
 
 func (r *zgridRenderer) MinSize() fyne.Size {
-	return r.zgrid.MinSize()
+	s := r.zgrid.MinSize()
+	return s
 }
 
 func (r *zgridRenderer) Objects() []fyne.CanvasObject {
@@ -2602,6 +2740,19 @@ func IsQuotationMark(c rune) bool {
 	default:
 		return false
 	}
+}
+
+// IsWordRune returns true if the given rune is part of an alphanumeric word. This excludes
+// format, space, and punctuation runes. This is very liberal, allowing all kinds of graphic
+// except for punctuation and whitespace.
+func IsWordRune(c rune) bool {
+	if !unicode.IsGraphic(c) {
+		return false
+	}
+	if unicode.IsPunct(c) || unicode.IsSpace(c) {
+		return false
+	}
+	return true
 }
 
 // GetKeyboardShortcutKey makes a lookup key for a fyne.KeyboardShortcut that is equal
