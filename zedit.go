@@ -61,6 +61,7 @@ type EditorEvent int
 const (
 	CaretMoveEvent EditorEvent = iota + 1
 	WordChangeEvent
+	SelectWordEvent
 )
 
 type EventHandler func(evt EditorEvent, editor *Editor) // used for editor events
@@ -112,6 +113,7 @@ type Config struct {
 	MaxTags              int64           // maximum number of tags (if 0 or below, no limit) only used during Load
 	MaxPrintLines        int             // maximum number of lines for printing for console mode, preceding lines are cut off
 	GetWordAtLeft        bool            // if true, word-change event triggers any word left of the caret if the caret is not on a word
+	LiberalGetWordAt     bool            // if true, word boundaries include punctuation but not parentheses (may be useful for Lisp symbol lookup)
 }
 
 // NewConfig returns a new config with default values.
@@ -294,7 +296,7 @@ func NewEditorWithConfig(columns, lines int, c fyne.Canvas, config *Config) *Edi
 	z.invertedDefaultStyle = Style{FGColor: theme.InputBackgroundColor(), BGColor: theme.ForegroundColor()}
 	z.defaultStyle = Style{FGColor: theme.ForegroundColor(), BGColor: theme.InputBackgroundColor()}
 	bgcolor := BlendColors(BlendColor, true, theme.TextColor(), theme.FocusColor())
-	fgcolor := theme.BackgroundColor()
+	fgcolor := theme.InputBackgroundColor() //theme.BackgroundColor()
 	z.lineNumberStyle = Style{FGColor: fgcolor, BGColor: bgcolor}
 	z.background = canvas.NewRectangle(theme.InputBackgroundColor())
 	z.background.StrokeColor = theme.InputBorderColor()
@@ -365,24 +367,36 @@ func NewEditorWithConfig(columns, lines int, c fyne.Canvas, config *Config) *Edi
 	return &z
 }
 
-// MakeOrGetColorTag creates or returns a tag for a given color. This method avoids duplicating tags
-// and adds an adequate style function for the tag that changes the color. It does define any payload or
-// callback. A color tag has the name "color-R-G-B-A-F" where R is decimal red, G decimal green, B is decimal
-// blue, A is decimal alpha and F is "true" if the color is for background, "false" otherwise. So, you shouldn't
-// use this name scheme for other tags if you plan to use pre-defined color tags. drawFullLine is passed
+// MakeOrGetColorTag creates or returns a tag for given foreground and background colors. This method avoids duplicating tags
+// and adds an adequate style function for the tag that changes the colors. It does define any payload or
+// callback. A color tag has the name "color-R1,G1,B1,A1-R2,G2,B2,A2" where R is decimal red, G decimal green, B is decimal
+// blue, A is decimal alpha and the digits are 1 for foreground and 2 for background. If a color is nil, the name component is "nil".
+// You shouldn't use this name scheme for other tags if you plan to use pre-defined color tags. drawFullLine is passed
 // to the styler's DrawFullLine field.
-func (z *Editor) MakeOrGetColorTag(c color.Color, background, drawFullLine bool) Tag {
-	r, g, b, a := c.RGBA()
-	name := fmt.Sprintf("_color-%v,%v,%v,%v-%v", r, g, b, a, background)
+func (z *Editor) MakeOrGetColorTag(fg, bg color.Color, drawFullLine bool) Tag {
+	name := "_color-"
+	if fg != nil {
+		r1, g1, b1, a1 := fg.RGBA()
+		name += fmt.Sprintf("%v1,%v1,%v1,%v1", r1, g1, b1, a1)
+	} else {
+		name += "nil"
+	}
+	if bg != nil {
+		r2, g2, b2, a2 := bg.RGBA()
+		name += fmt.Sprintf("-%v2,%v2,%v2,%v2", r2, g2, b2, a2)
+	} else {
+		name += "-nil"
+	}
 	tag := z.Tags.CloneTag(NewTag(name))
 	if z.Styles.HasStyler(name) {
 		return tag
 	}
 	cStyler := TagStyleFunc(func(tag Tag, cell Cell) Cell {
-		if background {
-			cell.Style.BGColor = c
-		} else {
-			cell.Style.FGColor = c
+		if fg != nil {
+			cell.Style.FGColor = fg
+		}
+		if bg != nil {
+			cell.Style.BGColor = bg
 		}
 		return cell
 	})
@@ -390,18 +404,34 @@ func (z *Editor) MakeOrGetColorTag(c color.Color, background, drawFullLine bool)
 	return tag
 }
 
-// getWordAt obtains the word under the given position or just before the position.
+// getWordAt obtains the word under the given position or just before the position, and the
+// corresponding char interval. If there is no word under the position, "" is returned.
+// If z.Config.LiberalGetWordAt is true, then the word selection algorithm is very liberal,
+// basically selecting any non-whitespace glyphs as word except that punctuation at the end
+// is removed with the exception of '?'. This is a special setting for Z3S5 Symbols.
+// Normal word selection selects an alphanumeric sequence of characters and should be
+// the right choice for normal use cases.
 // TODO Performance: We might want to avoid string conatenation here, or introduce a maximum word length.
-func (z *Editor) getWordAt(pos CharPos) string {
+func (z *Editor) getWordAt(pos CharPos) (string, CharInterval) {
+	var delFunc func(r rune) bool
+	var skipLeftFunc func(r rune) bool
+	if z.Config.LiberalGetWordAt {
+		delFunc = IsSymbolRune
+		skipLeftFunc = func(r rune) bool { return !unicode.IsPunct(r) || r == '?' }
+	} else {
+		delFunc = IsWordRune
+		skipLeftFunc = IsWordRune
+	}
+
 	c, ok := z.CharAt(pos)
 	if !ok {
-		return ""
+		return "", CharInterval{Start: pos, End: pos}
 	}
 	var s string
 	searchRight := false
-	if !IsWordRune(c) {
+	if !delFunc(c) {
 		if !z.Config.GetWordAtLeft {
-			return "" // pos is not in a word, so return
+			return "", CharInterval{Start: pos, End: pos} // pos is not in a word, so return
 		}
 		s = "" // continue, since there might be a word left of pos
 	} else {
@@ -418,17 +448,20 @@ func (z *Editor) getWordAt(pos CharPos) string {
 			if c == z.Config.SoftLF {
 				continue
 			}
-			if IsWordRune(c) {
+			if delFunc(c) {
 				s = string(c) + s
 			} else {
+				pl, _ = z.NextPos(pl)
 				break
 			}
 		} else {
+			pl, _ = z.NextPos(pl)
 			break
 		}
 	}
+	pos, _ = z.skipLeftUntil(pos, skipLeftFunc)
 	if !searchRight {
-		return s
+		return s, CharInterval{Start: pl, End: pos}
 	}
 	pr := pos
 	for {
@@ -440,16 +473,40 @@ func (z *Editor) getWordAt(pos CharPos) string {
 			if c == z.Config.SoftLF {
 				continue
 			}
-			if IsWordRune(c) {
+			if delFunc(c) {
 				s = s + string(c)
 			} else {
+				pr, _ = z.PrevPos(pr)
 				break
 			}
 		} else {
+			pr, _ = z.PrevPos(pr)
 			break
 		}
 	}
-	return s
+	pr, _ = z.skipLeftUntil(pr, skipLeftFunc)
+	return s, CharInterval{Start: pl, End: pr}
+}
+
+// skipLeftUntil searches a rune from pos (inclusive) to the left until fn returns true,
+// returns the new position and true if fn matched, an undefined position and false otherwise.
+func (z *Editor) skipLeftUntil(pos CharPos, fn func(c rune) bool) (CharPos, bool) {
+	found := false
+	for !found {
+		c, ok := z.CharAt(pos)
+		if !ok {
+			break
+		}
+		if fn(c) {
+			found = true
+			break
+		}
+		pos, ok = z.PrevPos(pos)
+		if !ok {
+			break
+		}
+	}
+	return pos, found
 }
 
 // SetEventHandler sets the event handler for the given editor event.
@@ -641,7 +698,7 @@ func (z *Editor) ScrollLeft(n int) {
 // FocusGained implements a Focusable.
 func (z *Editor) FocusGained() {
 	z.hasFocus = true
-	z.background.StrokeColor = theme.PrimaryColor()
+	z.background.StrokeColor = theme.FocusColor()
 	z.background.Refresh()
 	z.Refresh()
 }
@@ -731,9 +788,29 @@ func (z *Editor) CurrentSelection() (CharInterval, bool) {
 	return sel, true
 }
 
+// CurrentSelectionText obtains the current text selection.
+func (z *Editor) CurrentSelectionText() string {
+	sel, hasSelection := z.Tags.Lookup(z.Config.SelectionTag)
+	if !hasSelection {
+		return ""
+	}
+	return z.GetTextRange(sel)
+}
+
 // SelectWord selects the word under pos if there is one, removes the selection in any case.
 func (z *Editor) SelectWord(pos CharPos) {
 	z.RemoveSelection()
+	if z.Config.LiberalGetWordAt {
+		word, fromTo := z.getWordAt(pos)
+		if word != "" {
+			z.Tags.Upsert(z.Config.SelectionTag, fromTo)
+			z.Refresh()
+			if handler, ok := z.eventHandlers[SelectWordEvent]; ok {
+				handler(SelectWordEvent, z)
+			}
+		}
+		return
+	}
 	if pos.Line >= len(z.Rows) {
 		return
 	}
@@ -766,6 +843,9 @@ func (z *Editor) SelectWord(pos CharPos) {
 	z.selEnd = &CharPos{Line: pos.Line, Column: wEnd}
 	z.Tags.Upsert(z.Config.SelectionTag, CharInterval{Start: *z.selStart, End: *z.selEnd})
 	z.Refresh()
+	if handler, ok := z.eventHandlers[SelectWordEvent]; ok {
+		handler(SelectWordEvent, z)
+	}
 }
 
 // Select the given char interval. The interval is sanitized before setting the selection.
@@ -836,6 +916,8 @@ func (z *Editor) GetLineText(row int) string {
 	return string(z.Rows[row])
 }
 
+// MinSize returns the minimum size, which is calculated from the Columns
+// and Lines of the zedit widget.
 func (z *Editor) MinSize() fyne.Size {
 	if !z.Config.ShowLineNumbers {
 		return fyne.Size{Width: float32(z.Columns)*z.charSize.Width + 2*theme.InnerPadding(),
@@ -843,6 +925,10 @@ func (z *Editor) MinSize() fyne.Size {
 	}
 	return fyne.Size{Width: float32(z.lineNumberLen())*z.charSize.Width + float32(z.Columns)*z.charSize.Width + 2*theme.InnerPadding(),
 		Height: float32(z.Lines)*z.charSize.Height + 2*theme.InnerPadding()}
+	// TODO: The inner padding is used in the layout. However, the width tends to be much too large
+	// when using charSize, which is based on "M" character and theme settings.
+	// This ought not be the case. If 2*theme.InnerPadding() is removed, the size of the widget may become too small for
+	// some rare lines with wide glyphs in them, however.
 }
 
 // SetText sets the text in the editor to the given string, removing all tags in the process.
@@ -883,6 +969,27 @@ func (z *Editor) GetText() string {
 			sb.WriteRune(z.Config.HardLF)
 		default:
 			sb.WriteRune(z.Rows[i][len(z.Rows[i])-1])
+		}
+	}
+	return sb.String()
+}
+
+// GetTextRange returns the text in the given range.
+func (z *Editor) GetTextRange(interval CharInterval) string {
+	var sb strings.Builder
+	interval = interval.Sanitize(z.LastPos())
+	pos := interval.Start
+	for CmpPos(pos, interval.End) <= 0 {
+		c, ok := z.CharAt(pos)
+		if !ok {
+			break
+		}
+		if c != z.Config.SoftLF {
+			sb.WriteRune(c)
+		}
+		pos, ok = z.NextPos(pos)
+		if !ok {
+			break
 		}
 	}
 	return sb.String()
@@ -1253,8 +1360,8 @@ outer:
 	if z.Config.ShowLineNumbers {
 		z.lineNumberGrid.Hidden = false
 		// add line numbers if necessary
-		ll := strconv.Itoa(z.lineNumberLen())
-		fmtStr := "%" + ll + "d "
+		ll := strconv.Itoa(max(z.lineNumberLen(), 2))
+		fmtStr := " %" + ll + "d "
 		paraLineNo := z.Config.ParagraphLineNumbers
 		showLineNo := !paraLineNo
 		for i := 0; i < z.Lines; i++ {
@@ -1458,7 +1565,7 @@ func (z *Editor) maybeHandleWordChangeEvent(pos CharPos) {
 	if !ok || handler == nil {
 		return
 	}
-	word := z.getWordAt(pos)
+	word, _ := z.getWordAt(pos)
 	if word != z.currentWord {
 		z.currentWord = word
 		handler(WordChangeEvent, z)
@@ -1565,7 +1672,8 @@ func (z *Editor) MarkErrorParen(interval CharInterval) {
 	z.Tags.Add(interval, z.Config.ParenErrorTag)
 }
 
-// CharAt returns the unicode glyph at the given position.
+// CharAt returns the unicode glyph at the given position, true if the position is valid,
+// the unicode replacement char and false otherwise.
 func (z *Editor) CharAt(pos CharPos) (rune, bool) {
 	if len(z.Rows) == 0 {
 		return unicode.ReplacementChar, false
@@ -2445,16 +2553,6 @@ func (r *zgridRenderer) Layout(size fyne.Size) {
 	})
 	r.zgrid.scroll.Resize(fyne.Size{Width: theme.ScrollBarSize(), Height: r.zgrid.background.Size().Height})
 	r.zgrid.scroll.Move(fyne.Position{X: r.zgrid.Size().Width - theme.ScrollBarSize(), Y: 0})
-	// r.zgrid.border.Resize(fyne.Size{
-	// 	Width:  size.Width - 2*theme.Padding(),
-	// 	Height: size.Height - 2*theme.Padding(),
-	// })
-	// s := r.zgrid.MinSize()
-	// r.zgrid.border.Resize(fyne.Size{Width: s.Width - theme.Padding(), Height: s.Height})
-	// r.zgrid.border.Move(fyne.Position{X: theme.Padding(), Y: theme.Padding()})
-	// r.zgrid.scroll.Resize(fyne.Size{Width: theme.ScrollBarSize(), Height: r.zgrid.grid.MinSize().Height})
-	// r.zgrid.scroll.Move(fyne.Position{X: s.Width - theme.ScrollBarSize() - theme.Padding(), Y: theme.Padding() / 2})
-	// r.zgrid.background.Resize(fyne.Size{Width: s.Width + theme.Padding(), Height: s.Height - theme.Padding()})
 }
 
 func (r *zgridRenderer) MinSize() fyne.Size {
@@ -2750,6 +2848,23 @@ func IsWordRune(c rune) bool {
 		return false
 	}
 	if unicode.IsPunct(c) || unicode.IsSpace(c) {
+		return false
+	}
+	return true
+}
+
+// IsSymbolRune returns true if the given rune is a symbolic rune, including all kinds of separator
+// and delimiter characters but excluding whitespace and non-graphic glyphs. This function is more liberal
+// than IsWordRune because it includes punctuation.
+func IsSymbolRune(c rune) bool {
+	if unicode.IsSpace(c) {
+		return false
+	}
+	if !unicode.IsGraphic(c) {
+		return false
+	}
+	switch c {
+	case '(', ')', '[', ']', '{', '}', '\'', '"':
 		return false
 	}
 	return true
