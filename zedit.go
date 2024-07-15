@@ -560,6 +560,11 @@ func (z *Editor) SetTopLine(x int) {
 	z.scroll.Refresh()
 }
 
+// TopLine returns the topmost visible line.
+func (z *Editor) TopLine() int {
+	return z.lineOffset
+}
+
 // CenterLineOnCaret adjusts the displayed lines such that the caret is in the center of the grid.
 func (z *Editor) CenterLineOnCaret() {
 	line := z.caretPos.Line
@@ -1700,6 +1705,10 @@ func (z *Editor) MoveCaret(dir CaretMovement) {
 			z.CaretOn(blinking)
 			z.maybeDrawCaret()
 			z.maybeHighlightParen()
+			// handle caret move event
+			if handler, ok := z.eventHandlers[CaretMoveEvent]; ok && handler != nil {
+				handler(CaretMoveEvent, z)
+			}
 		}
 	}()
 	oldPos := z.caretPos
