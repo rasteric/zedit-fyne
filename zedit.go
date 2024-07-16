@@ -367,22 +367,23 @@ func NewEditorWithConfig(columns, lines int, c fyne.Canvas, config *Config) *Edi
 	return &z
 }
 
-// MakeOrGetColorTag creates or returns a tag for given foreground and background colors. This method avoids duplicating tags
-// and adds an adequate style function for the tag that changes the colors. It does define any payload or
-// callback. A color tag has the name "color-R1,G1,B1,A1-R2,G2,B2,A2" where R is decimal red, G decimal green, B is decimal
+// MakeOrGetStyleTag creates or returns a tag for given style and foreground and background colors. This method avoids duplicating tags
+// and adds an adequate style function for the tag. It does not define any payload or
+// callback. A style tag has the name "style-bold-italic-monospace-R1,G1,B1,A1-R2,G2,B2,A2" where R is decimal red, G decimal green, B is decimal
 // blue, A is decimal alpha and the digits are 1 for foreground and 2 for background. If a color is nil, the name component is "nil".
 // You shouldn't use this name scheme for other tags if you plan to use pre-defined color tags. drawFullLine is passed
 // to the styler's DrawFullLine field.
-func (z *Editor) MakeOrGetColorTag(fg, bg color.Color, drawFullLine bool) Tag {
-	name := "_color-"
-	if fg != nil {
-		r1, g1, b1, a1 := fg.RGBA()
+func (z *Editor) MakeOrGetStyleTag(s Style, drawFullLine bool) Tag {
+	name := "_style-"
+	name += fmt.Sprintf("%v-%v-%v-", s.Bold, s.Italic, s.Monospace)
+	if s.FGColor != nil {
+		r1, g1, b1, a1 := s.FGColor.RGBA()
 		name += fmt.Sprintf("%v1,%v1,%v1,%v1", r1, g1, b1, a1)
 	} else {
 		name += "nil"
 	}
-	if bg != nil {
-		r2, g2, b2, a2 := bg.RGBA()
+	if s.BGColor != nil {
+		r2, g2, b2, a2 := s.BGColor.RGBA()
 		name += fmt.Sprintf("-%v2,%v2,%v2,%v2", r2, g2, b2, a2)
 	} else {
 		name += "-nil"
@@ -392,12 +393,7 @@ func (z *Editor) MakeOrGetColorTag(fg, bg color.Color, drawFullLine bool) Tag {
 		return tag
 	}
 	cStyler := TagStyleFunc(func(tag Tag, cell Cell) Cell {
-		if fg != nil {
-			cell.Style.FGColor = fg
-		}
-		if bg != nil {
-			cell.Style.BGColor = bg
-		}
+		cell.Style = s
 		return cell
 	})
 	z.Styles.AddStyler(TagStyler{TagName: name, StyleFunc: cStyler, DrawFullLine: drawFullLine})
