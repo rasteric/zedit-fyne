@@ -18,7 +18,7 @@ func main() {
 
 	ed.AddEmacsShortcuts()
 	s := ""
-	for i := 0; i < 100; i++ {
+	for i := 0; i < 10000; i++ {
 		s += lorem.Sentence(5, 30)
 		s += "\n"
 	}

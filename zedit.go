@@ -62,6 +62,7 @@ const (
 	CaretMoveEvent EditorEvent = iota + 1
 	WordChangeEvent
 	SelectWordEvent
+	OnChangeEvent
 )
 
 type EventHandler func(evt EditorEvent, editor *Editor) // used for editor events
@@ -261,11 +262,10 @@ type Editor struct {
 	keyHandlers          map[fyne.KeyName]func(z *Editor)
 	canvas               fyne.Canvas
 	currentWord          string
-	// delayed refresh
+	// synchronization
 	refresher     func()
 	lastRefreshed time.Time
-	// synchronization
-	mutex sync.RWMutex
+	mutex         sync.RWMutex
 }
 
 // NewEditor returns a new editor widget with fixed columns and lines, which is displayed in the given
@@ -295,8 +295,8 @@ func NewEditorWithConfig(columns, lines int, c fyne.Canvas, config *Config) *Edi
 	_, z.caretBlinkCancel = context.WithCancel(context.Background())
 	z.invertedDefaultStyle = Style{FGColor: theme.InputBackgroundColor(), BGColor: theme.ForegroundColor()}
 	z.defaultStyle = Style{FGColor: theme.ForegroundColor(), BGColor: theme.InputBackgroundColor()}
-	bgcolor := BlendColors(BlendColor, true, theme.TextColor(), theme.FocusColor())
-	fgcolor := theme.InputBackgroundColor() //theme.BackgroundColor()
+	bgcolor := theme.OverlayBackgroundColor()
+	fgcolor := theme.PlaceHolderColor()
 	z.lineNumberStyle = Style{FGColor: fgcolor, BGColor: bgcolor}
 	z.background = canvas.NewRectangle(theme.InputBackgroundColor())
 	z.background.StrokeColor = theme.InputBorderColor()
@@ -933,8 +933,12 @@ func (z *Editor) MinSize() fyne.Size {
 }
 
 // SetText sets the text in the editor to the given string, removing all tags in the process.
+// This function changes the input, it replaces windows line endings with Unix endings and
+// tabs with spaces.
 func (z *Editor) SetText(s string) {
 	z.Tags.Clear()
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	// s = strings.ReplaceAll(s, "\t", "    ")
 	lines := strings.Split(s, "\n")
 	// populate the text grid
 	z.Rows = make([][]rune, 0)
@@ -953,6 +957,10 @@ func (z *Editor) SetText(s string) {
 		}
 	}
 	z.maybeHandleWordChangeEvent(z.caretPos)
+	handler, ok := z.eventHandlers[OnChangeEvent]
+	if ok && handler != nil {
+		handler(OnChangeEvent, z)
+	}
 	z.Refresh()
 }
 
@@ -1053,12 +1061,13 @@ func (z *Editor) wrapLine(r []rune) [][]rune {
 			c = 0
 		}
 	}
-	if lineStart < i {
-		for j := lineStart; j <= i; j++ {
-			b.WriteRune(r[j])
-		}
-		lines = append(lines, []rune(b.String()))
+
+	for j := lineStart; j <= i; j++ {
+		b.WriteRune(r[j])
 	}
+
+	lines = append(lines, []rune(b.String()))
+
 	return lines
 }
 
@@ -1077,15 +1086,15 @@ func (z *Editor) LineToPara(row int) (int, bool) {
 		return 1, true
 	}
 	if row > z.LastLine() {
-		return row + 1, false
+		return z.LastLine() + 1, false
 	}
 	c := 0
 	for i := 0; i < row; i++ {
-		if z.Rows[i][z.LastColumn(i)] == z.Config.HardLF {
+		if z.RuneAt_Sync(i, z.LastColumn(i)) == z.Config.HardLF {
 			c++
 		}
 	}
-	return c + 1, z.Rows[row-1][z.LastColumn(row-1)] == z.Config.HardLF
+	return c + 1, z.RuneAt_Sync(row-1, z.LastColumn(row-1)) == z.Config.HardLF
 }
 
 // ParaToLine returns the 0-indexed line number at which the given 1-index
@@ -1317,8 +1326,6 @@ func (z *Editor) Refresh() {
 			z.refresher = nil
 			z.mutex.Unlock()
 		}()
-		z.mutex.RLock()
-		defer z.mutex.RUnlock()
 		z.refresher()
 		return
 	}
@@ -1691,6 +1698,20 @@ func (z *Editor) CharAt(pos CharPos) (rune, bool) {
 	return z.Rows[pos.Line][pos.Column], true
 }
 
+// RuneAt_Sync safely returns the rune at line, column in a synchronized way. If line and column
+// are out of bounds, the unicode replacement char is returned.
+func (z *Editor) RuneAt_Sync(line, column int) rune {
+	z.mutex.RLock()
+	defer z.mutex.RUnlock()
+	if line < 0 || line >= len(z.Rows) || column < 0 {
+		return unicode.ReplacementChar
+	}
+	if column >= len(z.Rows[line]) {
+		return unicode.ReplacementChar
+	}
+	return z.Rows[line][column]
+}
+
 // MoveCaret moves the caret according to the given movement direction, which may be one of
 // CaretUp, CaretDown, CaretLeft, and CaretRight.
 func (z *Editor) MoveCaret(dir CaretMovement) {
@@ -1914,6 +1935,12 @@ func (z *Editor) Insert(r []rune, pos CharPos) {
 	for i := range rows {
 		z.Rows[i+startRow] = rows[i]
 	}
+
+	// handle events
+	handler, ok := z.eventHandlers[OnChangeEvent]
+	if ok && handler != nil {
+		handler(OnChangeEvent, z)
+	}
 }
 
 // adjustTagLines adjusts the given tags based on the given lineDelta, which represents the number of lines added
@@ -2049,6 +2076,12 @@ func (z *Editor) Delete(fromTo CharInterval) {
 	z.adjustTagLines(tags, -lineDelta, fromTo.Start)
 	z.SetCaret(CharPos{Line: newCursorRow + paraStart, Column: min(newCursorCol, len(z.Rows[newCursorRow+paraStart])-1)})
 	z.Refresh()
+
+	// handle events
+	handler, ok := z.eventHandlers[OnChangeEvent]
+	if ok && handler != nil {
+		handler(OnChangeEvent, z)
+	}
 }
 
 // ToEnd returns the char interval from the given position to the last char of the buffer.
@@ -2553,7 +2586,7 @@ func (r *zgridRenderer) Layout(size fyne.Size) {
 	r.zgrid.lineNumberGrid.Move(fyne.Position{X: theme.InnerPadding() / 2,
 		Y: theme.InnerPadding()})
 	r.zgrid.grid.Move(fyne.Position{
-		X: r.zgrid.lineNumberGrid.Position().X + r.zgrid.lineNumberGrid.Size().Width + theme.InnerPadding()/2,
+		X: r.zgrid.lineNumberGrid.Position().X + r.zgrid.lineNumberGrid.Size().Width + theme.InnerPadding(),
 		Y: theme.InnerPadding(),
 	})
 	r.zgrid.scroll.Resize(fyne.Size{Width: theme.ScrollBarSize(), Height: r.zgrid.background.Size().Height})

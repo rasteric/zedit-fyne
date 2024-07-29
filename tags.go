@@ -199,7 +199,7 @@ type TagContainer struct {
 	tags   map[Tag]CharInterval
 	lookup *interval.MultiValueSearchTree[Tag, CharPos]
 	names  map[string]*orderedset.OrderedSet[Tag]
-	mutex  sync.Mutex
+	mutex  sync.RWMutex
 }
 
 // NewTagContainer returns a new empty tag container.
@@ -238,17 +238,39 @@ func (t *TagContainer) Clear() {
 	t.lookup = interval.NewMultiValueSearchTreeWithOptions[Tag, CharPos](CmpPos, interval.TreeWithIntervalPoint())
 }
 
+// Clear all tags in the given char interval. This function only clears tags
+// within the interval, not ones overlapping it or larger ones.
+func (t *TagContainer) ClearRange(interval CharInterval) {
+	t.mutex.RLock()
+	tags, ok := t.lookup.AllIntersections(interval.Start, interval.End)
+	t.mutex.RUnlock()
+	if !ok {
+		return
+	}
+	for _, tag := range tags {
+		t.mutex.RLock()
+		iv, ok := t.tags[tag]
+		t.mutex.RUnlock()
+		if !ok {
+			continue
+		}
+		if CmpPos(iv.Start, interval.Start) >= 0 && CmpPos(iv.End, interval.End) <= 0 {
+			t.Delete(tag)
+		}
+	}
+}
+
 // LookupRange returns the tags intersecting with the given char interval.
 func (t *TagContainer) LookupRange(interval CharInterval) ([]Tag, bool) {
-	t.mutex.Lock()
-	defer t.mutex.Unlock()
+	t.mutex.RLock()
+	defer t.mutex.RUnlock()
 	return t.lookup.AllIntersections(interval.Start, interval.End)
 }
 
 // Lookup returns the char interval associated with the given tag.
 func (t *TagContainer) Lookup(tag Tag) (CharInterval, bool) {
-	t.mutex.Lock()
-	defer t.mutex.Unlock()
+	t.mutex.RLock()
+	defer t.mutex.RUnlock()
 	interval, ok := t.tags[tag]
 	return interval, ok
 }
@@ -349,8 +371,8 @@ func (t *TagContainer) Upsert(tag Tag, interval CharInterval) {
 // TagsByName returns all tags with the given name. This is used when stylers
 // are applied because these work on a by-name basis.
 func (t *TagContainer) TagsByName(name string) (*orderedset.OrderedSet[Tag], bool) {
-	t.mutex.Lock()
-	defer t.mutex.Unlock()
+	t.mutex.RLock()
+	defer t.mutex.RUnlock()
 	tags, ok := t.names[name]
 	return tags, ok
 }
