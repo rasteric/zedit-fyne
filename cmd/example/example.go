@@ -61,6 +61,5 @@ func main() {
 				}
 			}, w)
 		})
-	ed.Focus()
 	w.ShowAndRun()
 }

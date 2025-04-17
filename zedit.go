@@ -127,14 +127,14 @@ func NewConfig() *Config {
 	z.SelectionStyler = TagStyler{
 		TagName: z.SelectionTag.Name(),
 		StyleFunc: TagStyleFunc(func(tag Tag, c Cell) Cell {
-			fg := theme.TextColor()
-			bg := theme.SelectionColor()
+			fg := theme.Color(theme.ColorNameForeground)
+			bg := theme.Color(theme.ColorNameSelection)
 			if c.Style != EmptyStyle {
 				if c.Style.FGColor != nil {
-					fg = BlendColors(z.BlendFG, z.BlendFGSwitched, c.Style.FGColor, theme.ForegroundColor())
+					fg = BlendColors(z.BlendFG, z.BlendFGSwitched, c.Style.FGColor, theme.Color(theme.ColorNameForeground))
 				}
 				if c.Style.BGColor != nil {
-					bg = BlendColors(z.BlendBG, z.BlendBGSwitched, c.Style.BGColor, theme.SelectionColor())
+					bg = BlendColors(z.BlendBG, z.BlendBGSwitched, c.Style.BGColor, theme.Color(theme.ColorNameSelection))
 				}
 			}
 			selStyle := Style{FGColor: fg, BGColor: bg}
@@ -154,14 +154,14 @@ func NewConfig() *Config {
 	z.HighlightStyler = TagStyler{
 		TagName: z.HighlightTag.Name(),
 		StyleFunc: TagStyleFunc(func(tag Tag, c Cell) Cell {
-			fg := theme.TextColor()
-			bg := theme.PrimaryColor()
+			fg := theme.Color(theme.ColorNameForeground)
+			bg := theme.Color(theme.ColorNamePrimary)
 			if c.Style != EmptyStyle {
 				if c.Style.FGColor != nil {
-					fg = BlendColors(z.BlendFG, z.BlendFGSwitched, c.Style.FGColor, theme.ForegroundColor())
+					fg = BlendColors(z.BlendFG, z.BlendFGSwitched, c.Style.FGColor, theme.Color(theme.ColorNameForeground))
 				}
 				if c.Style.BGColor != nil {
-					bg = BlendColors(z.BlendBG, z.BlendBGSwitched, c.Style.BGColor, theme.PrimaryColor())
+					bg = BlendColors(z.BlendBG, z.BlendBGSwitched, c.Style.BGColor, theme.Color(theme.ColorNamePrimary))
 				}
 			}
 			selStyle := Style{FGColor: fg, BGColor: bg}
@@ -177,14 +177,14 @@ func NewConfig() *Config {
 	z.ErrorStyler = TagStyler{
 		TagName: z.ErrorTag.Name(),
 		StyleFunc: TagStyleFunc(func(tag Tag, c Cell) Cell {
-			fg := theme.TextColor()
-			bg := theme.ErrorColor()
+			fg := theme.Color(theme.ColorNameForeground)
+			bg := theme.Color(theme.ColorNameError)
 			if c.Style != EmptyStyle {
 				if c.Style.FGColor != nil {
-					fg = BlendColors(z.BlendFG, z.BlendFGSwitched, c.Style.FGColor, theme.TextColor())
+					fg = BlendColors(z.BlendFG, z.BlendFGSwitched, c.Style.FGColor, theme.Color(theme.ColorNameForeground))
 				}
 				if c.Style.BGColor != nil {
-					bg = BlendColors(z.BlendBG, z.BlendBGSwitched, c.Style.BGColor, theme.ErrorColor())
+					bg = BlendColors(z.BlendBG, z.BlendBGSwitched, c.Style.BGColor, theme.Color(theme.ColorNameError))
 				}
 			}
 			selStyle := Style{FGColor: fg, BGColor: bg}
@@ -263,8 +263,10 @@ type Editor struct {
 	canvas               fyne.Canvas
 	currentWord          string
 	// synchronization
+	refreshLocked uint32
 	refresher     func()
 	lastRefreshed time.Time
+	lockTimer     *time.Timer
 	mutex         sync.RWMutex
 }
 
@@ -293,13 +295,15 @@ func NewEditorWithConfig(columns, lines int, c fyne.Canvas, config *Config) *Edi
 	z.caretState = 1
 	z.Tags = NewTagContainer()
 	_, z.caretBlinkCancel = context.WithCancel(context.Background())
-	z.invertedDefaultStyle = Style{FGColor: theme.InputBackgroundColor(), BGColor: theme.ForegroundColor()}
-	z.defaultStyle = Style{FGColor: theme.ForegroundColor(), BGColor: theme.InputBackgroundColor()}
-	bgcolor := theme.OverlayBackgroundColor()
-	fgcolor := theme.PlaceHolderColor()
+	z.invertedDefaultStyle = Style{FGColor: theme.Color(theme.ColorNameInputBackground),
+		BGColor: theme.Color(theme.ColorNameForeground)}
+	z.defaultStyle = Style{FGColor: theme.Color(theme.ColorNameForeground),
+		BGColor: theme.Color(theme.ColorNameInputBackground)}
+	bgcolor := theme.Color(theme.ColorNameOverlayBackground)
+	fgcolor := theme.Color(theme.ColorNamePlaceHolder)
 	z.lineNumberStyle = Style{FGColor: fgcolor, BGColor: bgcolor}
-	z.background = canvas.NewRectangle(theme.InputBackgroundColor())
-	z.background.StrokeColor = theme.InputBorderColor()
+	z.background = canvas.NewRectangle(theme.Color(theme.ColorNameInputBackground))
+	z.background.StrokeColor = theme.Color(theme.ColorNameInputBorder)
 	z.background.StrokeWidth = theme.InputBorderSize()
 	z.background.CornerRadius = theme.InputRadiusSize()
 	z.lineNumberGrid = widget.NewTextGrid()
@@ -553,7 +557,7 @@ func (z *Editor) SetTopLine(x int) {
 		z.scroll.Offset = fyne.Position{X: pos.X, Y: max(0, z.charSize.Height*float32(z.lineOffset))}
 	}
 	z.Refresh()
-	z.scroll.Refresh()
+	fyne.Do(func() { z.scroll.Refresh() })
 }
 
 // TopLine returns the topmost visible line.
@@ -748,7 +752,7 @@ func (z *Editor) Dragged(evt *fyne.DragEvent) {
 		return
 	}
 	z.Refresh()
-	z.Focus()
+	fyne.Do(func() { z.Focus() })
 }
 
 func (z *Editor) Cursor() desktop.Cursor {
@@ -1308,6 +1312,8 @@ func (z *Editor) AddEmacsShortcuts() {
 
 // LAYOUT UPDATING
 
+// Refresh refreshes the editor display manually. This is normally not needed because it is called
+// by the editor whenever it needs a visual refresh. See LockRefresh and UnlockRefresh for use cases.
 func (z *Editor) Refresh() {
 	z.mutex.RLock()
 	last := z.lastRefreshed
@@ -1338,7 +1344,31 @@ func (z *Editor) Refresh() {
 	}()
 }
 
+// LockRefresh locks the editor's refresh for the given period or until UnlockRefresh is called.
+func (z *Editor) LockRefresh(period time.Duration) {
+	if atomic.LoadUint32(&z.refreshLocked) > 0 {
+		return
+	}
+	atomic.StoreUint32(&z.refreshLocked, 1)
+	z.lockTimer = time.AfterFunc(period, func() {
+		atomic.StoreUint32(&z.refreshLocked, 0)
+		z.Refresh()
+	})
+}
+
+// UnlockRefresh unlocks the editor for refresh and refreshes.
+func (z *Editor) UnlockRefresh() {
+	if z.lockTimer != nil {
+		z.lockTimer.Stop()
+	}
+	atomic.StoreUint32(&z.refreshLocked, 0)
+	z.Refresh()
+}
+
 func (z *Editor) refreshProc() {
+	if atomic.LoadUint32(&z.refreshLocked) > 0 {
+		return
+	}
 	defer func() {
 		z.lastInteraction = time.Now()
 		z.maybeDrawCaret()
@@ -1415,8 +1445,10 @@ outer:
 		}
 	}
 	z.adjustScroll()
-	z.lineNumberGrid.Refresh()
-	z.grid.Refresh()
+	fyne.Do(func() {
+		z.lineNumberGrid.Refresh()
+		z.grid.Refresh()
+	})
 }
 
 // curreentViewport is the char interval that is currently displayed
@@ -1450,7 +1482,7 @@ func (z *Editor) maybeDrawCaret() bool {
 	default:
 		z.grid.Rows[line].Cells[col].Style = z.defaultStyle.ToTextGridStyle()
 	}
-	z.grid.Refresh()
+	fyne.Do(func() { z.grid.Refresh() })
 	return true
 }
 
@@ -1527,7 +1559,7 @@ func (z *Editor) handleCaretEvent(evt TagEvent, pos1, pos2 CharPos) {
 				if interval.Contains(pos2) {
 					continue
 				}
-				cb(evt, tag, interval)
+				fyne.Do(func() { cb(evt, tag, interval) })
 			}
 		}
 	}
@@ -1576,7 +1608,7 @@ func (z *Editor) maybeHandleWordChangeEvent(pos CharPos) {
 	word, _ := z.getWordAt(pos)
 	if word != z.currentWord {
 		z.currentWord = word
-		handler(WordChangeEvent, z)
+		fyne.Do(func() { handler(WordChangeEvent, z) })
 	}
 }
 
@@ -1719,12 +1751,11 @@ func (z *Editor) MoveCaret(dir CaretMovement) {
 	blinking := z.CaretOff()
 	defer func() {
 		if drawCaret {
-			z.CaretOn(blinking)
-			z.maybeDrawCaret()
 			z.maybeHighlightParen()
+			z.CaretOn(blinking)
 			// handle caret move event
 			if handler, ok := z.eventHandlers[CaretMoveEvent]; ok && handler != nil {
-				handler(CaretMoveEvent, z)
+				fyne.Do(func() { handler(CaretMoveEvent, z) })
 			}
 		}
 	}()
@@ -1939,7 +1970,7 @@ func (z *Editor) Insert(r []rune, pos CharPos) {
 	// handle events
 	handler, ok := z.eventHandlers[OnChangeEvent]
 	if ok && handler != nil {
-		handler(OnChangeEvent, z)
+		fyne.Do(func() { handler(OnChangeEvent, z) })
 	}
 }
 
@@ -2578,19 +2609,21 @@ type zgridRenderer struct {
 func (r *zgridRenderer) Destroy() {}
 
 func (r *zgridRenderer) Layout(size fyne.Size) {
-	r.zgrid.background.Resize(size)
-	if !r.zgrid.Config.ShowLineNumbers {
-		r.zgrid.grid.Move(fyne.Position{X: theme.InnerPadding(), Y: theme.InnerPadding()})
-		return
-	}
-	r.zgrid.lineNumberGrid.Move(fyne.Position{X: theme.InnerPadding() / 2,
-		Y: theme.InnerPadding()})
-	r.zgrid.grid.Move(fyne.Position{
-		X: r.zgrid.lineNumberGrid.Position().X + r.zgrid.lineNumberGrid.Size().Width + theme.InnerPadding(),
-		Y: theme.InnerPadding(),
+	fyne.Do(func() {
+		r.zgrid.background.Resize(size)
+		if !r.zgrid.Config.ShowLineNumbers {
+			r.zgrid.grid.Move(fyne.Position{X: theme.InnerPadding(), Y: theme.InnerPadding()})
+			return
+		}
+		r.zgrid.lineNumberGrid.Move(fyne.Position{X: theme.InnerPadding() / 2,
+			Y: theme.InnerPadding()})
+		r.zgrid.grid.Move(fyne.Position{
+			X: r.zgrid.lineNumberGrid.Position().X + r.zgrid.lineNumberGrid.Size().Width + theme.InnerPadding(),
+			Y: theme.InnerPadding(),
+		})
+		r.zgrid.scroll.Resize(fyne.Size{Width: theme.ScrollBarSize(), Height: r.zgrid.background.Size().Height})
+		r.zgrid.scroll.Move(fyne.Position{X: r.zgrid.Size().Width - theme.ScrollBarSize(), Y: 0})
 	})
-	r.zgrid.scroll.Resize(fyne.Size{Width: theme.ScrollBarSize(), Height: r.zgrid.background.Size().Height})
-	r.zgrid.scroll.Move(fyne.Position{X: r.zgrid.Size().Width - theme.ScrollBarSize(), Y: 0})
 }
 
 func (r *zgridRenderer) MinSize() fyne.Size {
@@ -2603,7 +2636,7 @@ func (r *zgridRenderer) Objects() []fyne.CanvasObject {
 }
 
 func (r *zgridRenderer) Refresh() {
-	r.zgrid.Refresh()
+	fyne.Do(func() { r.zgrid.Refresh() })
 }
 
 func substring(s string, start int, end int) string {
